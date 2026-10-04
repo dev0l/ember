@@ -1,11 +1,14 @@
-import { useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable } from 'react-native';
+import { useState, useCallback, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import { useEmberStore } from '@/store';
 import type { EmberNode } from '@/core';
 import { EmberHub } from '@/components/ember-hub/EmberHub';
+import { listEmbers } from '@/services/ember-storage';
+import { listProjects } from '@/services/ember-project-storage';
 
 // ─────────────────────────────────────────────
 // Home Hub Screen
@@ -15,15 +18,31 @@ interface RecentEmberItem {
   id: string;
   title: string;
   type: string;
+  kind: 'seed' | 'project';
   time: string;
+  updatedAt: string;
+  hasDesignPack: boolean;
+  seedId?: string;
 }
 
-const RECENT_EMBERS: RecentEmberItem[] = [
-  { id: '1', title: 'Hearth Orchestration Protocol', type: 'Framework', time: '2h ago' },
-  { id: '2', title: 'Scout Reconnaissance Findings', type: 'Document', time: '5h ago' },
-  { id: '3', title: 'Ember Spec Draft v0.3', type: 'Specification', time: '1d ago' },
-  { id: '4', title: 'Concept Art Moodboard', type: 'Design', time: '3d ago' },
-];
+function formatRelativeTime(isoString: string): string {
+  try {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Home-level ember nodes.
@@ -62,8 +81,8 @@ const HOME_NODES: EmberNode[] = [
   },
   {
     id: 'create',
-    label: 'Create Ember',
-    subtitle: 'Start from a spark',
+    label: 'Spark Ember',
+    subtitle: 'Something is beginning',
     icon: 'flame',
     offsetAngle: 270,   // Left
     offsetRadius: 1,
@@ -74,11 +93,84 @@ const HOME_NODES: EmberNode[] = [
 
 export default function HubScreen() {
   const { state, selectedNodeId, setNodes } = useEmberStore();
+  const [recents, setRecents] = useState<RecentEmberItem[]>([]);
 
   // Load home nodes on mount
   useEffect(() => {
     setNodes(HOME_NODES);
   }, [setNodes]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const seeds = listEmbers();
+      const projects = listProjects();
+
+      const seedItems: RecentEmberItem[] = seeds.map((s) => ({
+        id: s.id,
+        title: s.name || 'Untitled Ember',
+        type: s.nature.toUpperCase(),
+        kind: 'seed',
+        time: formatRelativeTime(s.updatedAt),
+        updatedAt: s.updatedAt,
+        hasDesignPack: false,
+      }));
+
+      const projectItems: RecentEmberItem[] = projects.map((p) => ({
+        id: p.id,
+        title: p.name || 'Untitled Project',
+        type: p.designPackVersion > 0 ? `PACK v${p.designPackVersion}` : 'ENQUIRY',
+        kind: 'project',
+        time: formatRelativeTime(p.updatedAt),
+        updatedAt: p.updatedAt,
+        hasDesignPack: p.designPackVersion > 0 || p.status === 'generated',
+        seedId: p.seedId,
+      }));
+
+      // Exclude project items whose Ember seed is already shown
+      const seedIds = new Set(seeds.map((s) => s.id));
+      const dedupedProjects = projectItems.filter(
+        (p) => !p.seedId || !seedIds.has(p.seedId),
+      );
+
+      const combined = [...seedItems, ...dedupedProjects].sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      );
+
+      setRecents(combined.slice(0, 10));
+    }, []),
+  );
+
+  const handleOpenRecent = useCallback((item: RecentEmberItem) => {
+    if (item.kind === 'seed') {
+      router.push(`/(main)/ember/${item.id}` as any);
+      return;
+    }
+    // Route through Ember View when the project has a seed association
+    if (item.seedId) {
+      router.push(`/(main)/ember/${item.seedId}` as any);
+      return;
+    }
+    // Legacy projects without seedId — direct access
+    if (item.hasDesignPack) {
+      Alert.alert(
+        item.title,
+        'Choose an action for this enquiry:',
+        [
+          {
+            text: 'View Design Pack',
+            onPress: () => router.push(`/(main)/design-pack/${item.id}` as any),
+          },
+          {
+            text: 'Resume Enquiry',
+            onPress: () => router.push(`/(main)/ember-session/${item.id}` as any),
+          },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+    } else {
+      router.push(`/(main)/ember-session/${item.id}` as any);
+    }
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -107,27 +199,61 @@ export default function HubScreen() {
           </View>
         )}
 
-        {/* ── Recent Embers Horizontal Scroll (only visible when no node is selected) ── */}
+        {/* ── Embers Domain Entry ── */}
+        <Pressable
+          onPress={() => router.push('/(main)/collections' as any)}
+          style={styles.createButton}
+        >
+          <Text style={styles.createButtonIcon}>🔥</Text>
+          <Text style={styles.createButtonText}>Embers</Text>
+          <Text style={styles.createButtonHint}>Browse, create, encounter</Text>
+        </Pressable>
+
+        {/* ── Sparks Domain Entry ── */}
+        <Pressable
+          onPress={() => router.push('/(main)/sparks' as any)}
+          style={styles.sparkButton}
+        >
+          <Text style={styles.sparkButtonText}>Sparks</Text>
+          <Text style={styles.sparkButtonHint}>Capture, browse, relate</Text>
+        </Pressable>
+
+        {/* ── Recent Activity Horizontal Scroll (only visible when no node is selected) ── */}
         {selectedNodeId === null && (
           <View style={styles.recentSection}>
-            <Text style={styles.recentSectionTitle}>Recent Embers</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.recentScrollContent}
-            >
-              {RECENT_EMBERS.map((item) => (
-                <Pressable key={item.id} style={styles.recentCard}>
-                  <View style={styles.recentCardHeader}>
-                    <Text style={styles.recentCardType}>{item.type}</Text>
-                    <Text style={styles.recentCardTime}>{item.time}</Text>
-                  </View>
-                  <Text style={styles.recentCardTitle} numberOfLines={2}>
-                    {item.title}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
+            <View style={styles.recentHeaderRow}>
+              <Text style={styles.recentSectionTitle}>Recent Activity</Text>
+              <Pressable onPress={() => router.push('/(main)/recent' as any)}>
+                <Text style={styles.seeAllText}>See all →</Text>
+              </Pressable>
+            </View>
+            {recents.length > 0 ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.recentScrollContent}
+              >
+                {recents.map((item) => (
+                  <Pressable
+                    key={`${item.kind}-${item.id}`}
+                    style={styles.recentCard}
+                    onPress={() => handleOpenRecent(item)}
+                  >
+                    <View style={styles.recentCardHeader}>
+                      <Text style={styles.recentCardType}>{item.type}</Text>
+                      <Text style={styles.recentCardTime}>{item.time}</Text>
+                    </View>
+                    <Text style={styles.recentCardTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            ) : (
+              <Text style={styles.emptyRecentText}>
+                No activity yet. Create an Ember or capture Sparks.
+              </Text>
+            )}
           </View>
         )}
 
@@ -186,6 +312,59 @@ const styles = StyleSheet.create({
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
   },
 
+  // Direct Spark Ember button
+  createButton: {
+    alignItems: 'center',
+    paddingVertical: SPACING.lg,
+    paddingHorizontal: SPACING.xl * 2,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.3)',
+    backgroundColor: 'rgba(255, 107, 43, 0.08)',
+    marginTop: SPACING.xl,
+    gap: SPACING.xs,
+  },
+  createButtonIcon: {
+    fontSize: 28,
+  },
+  createButtonText: {
+    fontSize: TYPOGRAPHY.sizes.md,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    letterSpacing: TYPOGRAPHY.letterSpacing.extraWide,
+  },
+  createButtonHint: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+
+  // Spark pipeline button
+  sparkButton: {
+    alignItems: 'center',
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 180, 100, 0.25)',
+    backgroundColor: 'rgba(255, 180, 100, 0.06)',
+    marginTop: SPACING.md,
+    gap: SPACING.xs,
+  },
+  sparkButtonText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+  sparkButtonHint: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+
   // Recent Embers list
   recentSection: {
     width: '100%',
@@ -193,14 +372,31 @@ const styles = StyleSheet.create({
     marginTop: 'auto',
     marginBottom: SPACING.lg,
   },
+  recentHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.sm,
+    paddingHorizontal: SPACING.xs,
+  },
   recentSectionTitle: {
     fontSize: 9,
     fontWeight: '700',
     color: COLORS.textSecondary,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
-    marginBottom: SPACING.sm,
-    paddingLeft: SPACING.xs,
+  },
+  seeAllText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.5,
+  },
+  emptyRecentText: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+    paddingHorizontal: SPACING.xs,
   },
   recentScrollContent: {
     paddingHorizontal: SPACING.xs,

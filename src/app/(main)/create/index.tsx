@@ -7,8 +7,8 @@
 // A warm, gentle, scrollable surface that asks only
 // enough to begin.
 //
-// Sections (all optional except nature):
-//   1. "What is beginning?" — nature selection
+// Sections (all optional — nature defaults to 'open'):
+//   1. "What is beginning?" — nature classification
 //   2. "Give it a name, if one has arrived"
 //   3. "Is there anything you want to bring with you?"
 //   4. "Any questions worth carrying?"
@@ -37,44 +37,9 @@ import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import {
   type EmberNature,
   type EmberSource,
-  EMBER_NATURE_LABELS,
-  EMBER_NATURE_HINTS,
   createEmberSeed,
 } from '@/core';
 import { saveEmber } from '@/services/ember-storage';
-
-// ── Nature Selection ────────────────────────
-
-const NATURES: EmberNature[] = ['project', 'idea', 'principle', 'open'];
-
-interface NaturePillProps {
-  nature: EmberNature;
-  selected: boolean;
-  onPress: () => void;
-}
-
-function NaturePill({ nature, selected, onPress }: NaturePillProps) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={[styles.naturePill, selected && styles.naturePillSelected]}
-    >
-      <Text
-        style={[
-          styles.naturePillLabel,
-          selected && styles.naturePillLabelSelected,
-        ]}
-      >
-        {EMBER_NATURE_LABELS[nature]}
-      </Text>
-      {selected && (
-        <Text style={styles.naturePillHint}>
-          {EMBER_NATURE_HINTS[nature]}
-        </Text>
-      )}
-    </Pressable>
-  );
-}
 
 // ── Source Chip ──────────────────────────────
 
@@ -87,7 +52,7 @@ function SourceChip({ source, onRemove }: SourceChipProps) {
   return (
     <View style={styles.sourceChip}>
       <Text style={styles.sourceChipText} numberOfLines={1}>
-        📎 {source.name}
+        {source.name}
       </Text>
       <Pressable onPress={onRemove} hitSlop={8}>
         <Text style={styles.sourceChipRemove}>✕</Text>
@@ -100,7 +65,7 @@ function SourceChip({ source, onRemove }: SourceChipProps) {
 
 export default function CreateEmberScreen() {
   // Form state
-  const [nature, setNature] = useState<EmberNature | null>(null);
+  const [nature, setNature] = useState<EmberNature>('open');
   const [name, setName] = useState('');
   const [spark, setSpark] = useState('');
   const [questionsText, setQuestionsText] = useState('');
@@ -140,11 +105,6 @@ export default function CreateEmberScreen() {
 
   // ── Create & persist ──
   const handleBegin = useCallback(() => {
-    if (!nature) {
-      Alert.alert('What is beginning?', 'Choose a nature for your Ember.');
-      return;
-    }
-
     setIsSaving(true);
 
     try {
@@ -215,20 +175,9 @@ export default function CreateEmberScreen() {
             </View>
           </View>
 
-          {/* ── Section 1: Nature ── */}
-          <View style={styles.section}>
-            <Text style={styles.sectionQuestion}>What is beginning?</Text>
-            <View style={styles.natureGrid}>
-              {NATURES.map((n) => (
-                <NaturePill
-                  key={n}
-                  nature={n}
-                  selected={nature === n}
-                  onPress={() => setNature(n)}
-                />
-              ))}
-            </View>
-          </View>
+          {/* Nature defaults to 'open' — selection removed because Ember
+              cannot yet meaningfully honour the distinction. The field persists
+              in the data model for future responsive classification. */}
 
           {/* ── Section 2: Name ── */}
           <View style={styles.section}>
@@ -279,7 +228,7 @@ export default function CreateEmberScreen() {
               style={styles.bringFileButton}
             >
               <Text style={styles.bringFileText}>
-                📄 Bring a file
+                Bring a file
               </Text>
             </Pressable>
           </View>
@@ -322,28 +271,23 @@ export default function CreateEmberScreen() {
           {/* ── Begin ── */}
           <Pressable
             onPress={handleBegin}
-            disabled={!nature || isSaving}
+            disabled={isSaving}
             style={[
               styles.beginButton,
-              (!nature || isSaving) && styles.beginButtonDisabled,
+              isSaving && styles.beginButtonDisabled,
             ]}
           >
             {isSaving ? (
               <ActivityIndicator color={COLORS.deepCharcoal} size="small" />
             ) : (
-              <Text
-                style={[
-                  styles.beginText,
-                  !nature && styles.beginTextDisabled,
-                ]}
-              >
+              <Text style={styles.beginText}>
                 Begin
               </Text>
             )}
           </Pressable>
 
           <Text style={styles.footerHint}>
-            Everything except nature is optional.{'\n'}
+            Everything is optional.{'\n'}
             You can always add more from inside the Ember.
           </Text>
         </ScrollView>
@@ -427,40 +371,6 @@ const styles = StyleSheet.create({
   },
 
   // Nature pills
-  natureGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-  },
-  naturePill: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 107, 43, 0.25)',
-    backgroundColor: 'rgba(255, 107, 43, 0.05)',
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  naturePillSelected: {
-    borderColor: COLORS.emberOrange,
-    backgroundColor: 'rgba(255, 107, 43, 0.15)',
-  },
-  naturePillLabel: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textSecondary,
-    fontWeight: '600',
-    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
-  },
-  naturePillLabelSelected: {
-    color: COLORS.emberOrange,
-  },
-  naturePillHint: {
-    fontSize: 9,
-    color: COLORS.textMuted,
-    marginTop: 2,
-    textAlign: 'center',
-  },
 
   // Text inputs
   textInput: {
@@ -538,9 +448,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.deepCharcoal,
     letterSpacing: TYPOGRAPHY.letterSpacing.extraWide,
-  },
-  beginTextDisabled: {
-    color: COLORS.textMuted,
   },
 
   // Footer

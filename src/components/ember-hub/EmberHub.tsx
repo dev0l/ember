@@ -67,7 +67,7 @@ export const EmberHub = () => {
 
       if (dist < 50) {
         if (state === 'AWAKENED') {
-          runOnJS(dispatch)({ type: 'HOLD' });
+          runOnJS(dispatch)({ type: 'HOLD' }); // runOnJS isdeprecated
         }
       }
     })
@@ -138,7 +138,7 @@ export const EmberHub = () => {
           const rad = ((node.offsetAngle - 90) * Math.PI) / 180;
           const nx = cx + orbitRadius * node.offsetRadius * Math.cos(rad);
           const ny = cy + orbitRadius * node.offsetRadius * Math.sin(rad);
-          
+
           const closeRadius = 64; // Sits just outside the 36px core
           const closeX = cx + closeRadius * Math.cos(rad);
           const closeY = cy + closeRadius * Math.sin(rad);

@@ -9,43 +9,209 @@
 // annotations, and deeper exploration happen.
 // ─────────────────────────────────────────────
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
   ScrollView,
   Pressable,
   StyleSheet,
+  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import type { EmberSeed } from '@/core';
-import { loadEmber, loadEmberMarkdown } from '@/services/ember-storage';
+import type { Spark } from '@/core/spark-types';
+import type { EmberProject } from '@/core/ember-project-types';
+import { emberSeedToProject } from '@/core';
+import { loadEmber, loadEmberMarkdown, deleteEmber } from '@/services/ember-storage';
+import { listSparks, saveSpark } from '@/services/spark-storage';
+import {
+  loadLatestDesignPack,
+  loadProjectByEmberId,
+  saveProject,
+  saveDesignPack,
+} from '@/services/ember-project-storage';
+import {
+  getFoundationalQuestions,
+  getAvailableExploratoryQuestions,
+} from '@/knowledge/questions';
+import { generateDesignPack } from '@/engine/design-pack-generator';
 
 export default function EmberViewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [seed, setSeed] = useState<EmberSeed | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
+  const [participatingSparks, setParticipatingSparks] = useState<Spark[]>([]);
+  const [project, setProject] = useState<EmberProject | null>(null);
+  const [designPack, setDesignPack] = useState<{ version: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (!id) return;
+  // Derived progression state
+  const foundationalCount = useMemo(() => getFoundationalQuestions().length, []);
 
-    setLoading(true);
-    const loadedSeed = loadEmber(id);
-    const loadedMarkdown = loadEmberMarkdown(id);
-    setSeed(loadedSeed);
-    setMarkdown(loadedMarkdown);
-    setLoading(false);
-  }, [id]);
+  const progression = useMemo(() => {
+    if (!project) return { developed: false, exploring: false, explored: false, generated: false, canExplore: false, canGenerate: false };
+    const developed = project.answers.length >= foundationalCount;
+    const hasExploratoryAnswers = project.answers.length > foundationalCount;
+    const generated = project.designPackVersion > 0;
+    const availableExploratory = developed
+      ? getAvailableExploratoryQuestions(
+          project.askedQuestionIds,
+          project.conditions.map(c => c.id),
+        )
+      : [];
+    const moreToExplore = availableExploratory.length > 0;
+    // exploring: has begun exploratory but more questions remain
+    const exploring = hasExploratoryAnswers && moreToExplore;
+    // explored: has answered at least one exploratory AND no more remain
+    const explored = hasExploratoryAnswers && !moreToExplore;
+    // canExplore: developed, has available exploratory questions, hasn't finished
+    const canExplore = developed && !generated && moreToExplore;
+    // canGenerate: developed is sufficient. Explore is voluntary enrichment,
+    // not a gate. Generation becomes available once Develop establishes
+    // the foundational conditions. Do not promote "all exploratory questions
+    // exhausted" into domain truth for when generation is warranted.
+    const canGenerate = developed && !generated;
+    return { developed, exploring, explored, generated, canExplore, canGenerate };
+  }, [project, foundationalCount]);
+
+  // Reload every time this screen comes into focus (e.g. after editing or returning from session)
+  useFocusEffect(
+    useCallback(() => {
+      if (!id) return;
+      setLoading(true);
+      const loadedSeed = loadEmber(id);
+      const loadedMarkdown = loadEmberMarkdown(id);
+      setSeed(loadedSeed);
+      setMarkdown(loadedMarkdown);
+
+      // Find Sparks that participate in this Ember
+      const associated = listSparks('ember-associated')
+        .filter(s => s.emberId === id);
+      setParticipatingSparks(associated);
+
+      // Discover associated EmberProject via indexed lookup
+      const associatedProject = loadProjectByEmberId(id) ?? null;
+      setProject(associatedProject);
+
+      // Load latest Design Pack if generated
+      if (associatedProject && associatedProject.designPackVersion > 0) {
+        const pack = loadLatestDesignPack(associatedProject.id);
+        setDesignPack(pack ? { version: pack.version } : null);
+      } else {
+        setDesignPack(null);
+      }
+
+      setLoading(false);
+    }, [id]),
+  );
 
   const handleBack = useCallback(() => {
-    // Go back to hub, not to create screen
-    router.replace('/');
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/');
+    }
   }, []);
+
+  const handleEdit = useCallback(() => {
+    if (id) {
+      router.push(`/(main)/ember/edit/${id}` as any);
+    }
+  }, [id]);
+
+  // ── Develop further: cross from initiation into enquiry ──
+  const handleDevelop = useCallback(() => {
+    if (!seed) return;
+
+    // The crossing: EmberSeed → EmberProject
+    const newProject = emberSeedToProject(seed);
+    saveProject(newProject);
+
+    // Navigate to the Ember Session with the new project
+    router.push({
+      pathname: '/(main)/ember-session/[id]',
+      params: { id: newProject.id },
+    } as any);
+  }, [seed]);
+
+  // ── Explore further: enter exploratory phase of existing inquiry ──
+  const handleExplore = useCallback(() => {
+    if (!project) return;
+    router.push({
+      pathname: '/(main)/ember-session/[id]',
+      params: { id: project.id, startPhase: 'exploratory' },
+    } as any);
+  }, [project]);
+
+  // ── Generate Design Pack from the Ember surface ──
+  const handleGenerateFromEmber = useCallback(() => {
+    if (!project) return;
+    try {
+      const packMarkdown = generateDesignPack(project);
+      const version = project.designPackVersion + 1;
+      saveDesignPack(project.id, version, packMarkdown);
+      const updated: EmberProject = {
+        ...project,
+        status: 'generated',
+        designPackVersion: version,
+        updatedAt: new Date().toISOString(),
+      };
+      saveProject(updated);
+      setProject(updated);
+      setDesignPack({ version });
+      router.push({
+        pathname: '/(main)/design-pack/[id]',
+        params: { id: project.id },
+      } as any);
+    } catch (error) {
+      Alert.alert('Generation failed', 'Something went wrong generating the Design Pack.');
+      if (__DEV__) console.error('🔥 [Ember] Design Pack generation error:', error);
+    }
+  }, [project]);
+
+  // ── Remove Ember ──
+  // Guardian amendment: only undeveloped Embers can be removed cleanly.
+  // Developed Embers encounter the relational boundary.
+  const handleRemove = useCallback(() => {
+    if (!seed || !id) return;
+
+    if (project) {
+      // This Ember has an associated Inquiry — removal is relationally non-trivial
+      Alert.alert(
+        'Removal boundary',
+        'This Ember has been developed into an Inquiry. Removing an Ember with existing Inquiry lineage requires answering questions about what happens to conditions, propositions, and any generated artifacts.\n\nThis boundary has become relationally non-trivial. Removal for developed Embers is deferred to the database cycle.',
+        [{ text: 'OK' }],
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Remove Ember',
+      `Remove this Ember?${participatingSparks.length > 0 ? ` ${participatingSparks.length} participating Spark${participatingSparks.length > 1 ? 's' : ''} will return to Lingering.` : ''}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            // Release participating Sparks to lingering
+            for (const spark of participatingSparks) {
+              saveSpark({ ...spark, status: 'lingering', emberId: undefined });
+            }
+            // Delete the EmberSeed
+            deleteEmber(id);
+            // Navigate away
+            router.replace('/');
+          },
+        },
+      ],
+    );
+  }, [seed, id, project, participatingSparks]);
 
   if (loading) {
     return (
@@ -85,14 +251,13 @@ export default function EmberViewScreen() {
           <Text style={styles.backArrow}>←</Text>
         </Pressable>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerNature}>
-            {seed.nature.toUpperCase()}
-          </Text>
           <Text style={styles.headerTitle} numberOfLines={1}>
             {title}
           </Text>
         </View>
-        <View style={styles.headerSpacer} />
+        <Pressable onPress={handleEdit} hitSlop={12}>
+          <Text style={styles.editButton}>Edit</Text>
+        </Pressable>
       </View>
 
       {/* ── Divider ── */}
@@ -107,6 +272,127 @@ export default function EmberViewScreen() {
         {/* Render markdown as styled text blocks */}
         {renderMarkdownBlocks(displayMarkdown)}
 
+        {/* ── Participating Sparks ── */}
+        {participatingSparks.length > 0 && (
+          <View style={styles.sparksSection}>
+            <Text style={styles.sparksSectionTitle}>
+              PARTICIPATING SPARKS · {participatingSparks.length}
+            </Text>
+            {participatingSparks.map((spark) => (
+              <View key={spark.id} style={styles.sparkItem}>
+                <Text style={styles.sparkItemTitle} numberOfLines={1}>
+                  {spark.title}
+                </Text>
+                <Text style={styles.sparkItemContent} numberOfLines={2}>
+                  {spark.content}
+                </Text>
+                <Text style={styles.sparkItemDate}>
+                  {formatDate(spark.createdAt)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* ── Inquiry Progression ── */}
+        <View style={styles.developSection}>
+          <View style={styles.developDivider} />
+
+          {/* Develop */}
+          {!project ? (
+            <Pressable onPress={handleDevelop} style={styles.developButton}>
+              <Text style={styles.developButtonText}>
+                Develop
+              </Text>
+              <Text style={styles.developButtonHint}>
+                Carry this into structured enquiry
+              </Text>
+            </Pressable>
+          ) : !progression.developed ? (
+            <Pressable
+              onPress={() => router.push({
+                pathname: '/(main)/ember-session/[id]',
+                params: { id: project.id },
+              } as any)}
+              style={styles.developButton}
+            >
+              <Text style={styles.developButtonText}>
+                Developing
+              </Text>
+              <Text style={styles.developButtonHint}>
+                {project.answers.length} of {foundationalCount} answered
+              </Text>
+            </Pressable>
+          ) : (
+            <View style={styles.completedMovement}>
+              <Text style={styles.completedText}>✓ Developed</Text>
+              <Text style={styles.completedHint}>
+                {project.conditions.length} condition{project.conditions.length !== 1 ? 's' : ''} established
+              </Text>
+            </View>
+          )}
+
+          {/* Explore */}
+          {progression.canExplore && (
+            <Pressable onPress={handleExplore} style={styles.developButton}>
+              <Text style={styles.developButtonText}>
+                Explore
+              </Text>
+              <Text style={styles.developButtonHint}>
+                Voluntary questions from what has been established
+              </Text>
+            </Pressable>
+          )}
+          {progression.exploring && (
+            <Pressable onPress={handleExplore} style={styles.developButton}>
+              <Text style={styles.developButtonText}>
+                Exploring
+              </Text>
+              <Text style={styles.developButtonHint}>
+                {project!.answers.length - foundationalCount} answered · more available
+              </Text>
+            </Pressable>
+          )}
+          {progression.explored && (
+            <View style={styles.completedMovement}>
+              <Text style={styles.completedText}>✓ Explored</Text>
+              <Text style={styles.completedHint}>
+                {project!.answers.length - foundationalCount} additional answer{project!.answers.length - foundationalCount !== 1 ? 's' : ''}
+              </Text>
+            </View>
+          )}
+
+          {/* Generate Design Pack */}
+          {progression.canGenerate && !progression.generated && (
+            <Pressable onPress={handleGenerateFromEmber} style={[styles.developButton, styles.generateButton]}>
+              <Text style={styles.generateButtonText}>
+                Generate Design Pack
+              </Text>
+              <Text style={styles.developButtonHint}>
+                From what has been established
+              </Text>
+            </Pressable>
+          )}
+
+          {/* View Design Pack (consequence visible from Ember) */}
+          {progression.generated && designPack && (
+            <Pressable
+              onPress={() => router.push({
+                pathname: '/(main)/design-pack/[id]',
+                params: { id: project!.id },
+              } as any)}
+              style={styles.developButton}
+            >
+              <Text style={styles.completedText}>
+                ✓ Design Pack v{designPack.version}
+              </Text>
+              <Text style={styles.developButtonHint}>
+                Tap to view
+              </Text>
+            </Pressable>
+          )}
+        </View>
+
         {/* ── Meta Footer ── */}
         <View style={styles.metaFooter}>
           <Text style={styles.metaText}>
@@ -116,6 +402,13 @@ export default function EmberViewScreen() {
             ID: {seed.id}
           </Text>
         </View>
+
+        {/* ── Remove Ember ── */}
+        <Pressable onPress={handleRemove} style={styles.removeButton}>
+          <Text style={styles.removeButtonText}>
+            Remove Ember
+          </Text>
+        </Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -282,21 +575,17 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
   },
-  headerNature: {
-    fontSize: 8,
-    fontWeight: '700',
-    color: COLORS.emberOrange,
-    letterSpacing: 2,
-    opacity: 0.7,
-  },
   headerTitle: {
     fontSize: TYPOGRAPHY.sizes.md,
     fontWeight: '500',
     color: COLORS.textPrimary,
     letterSpacing: TYPOGRAPHY.letterSpacing.normal,
   },
-  headerSpacer: {
-    width: 36, // Balance the back arrow
+  editButton: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    paddingHorizontal: SPACING.xs,
   },
 
   // Divider
@@ -326,6 +615,120 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
     fontFamily: 'monospace',
+  },
+
+  // Participating Sparks
+  sparksSection: {
+    marginTop: SPACING.xl,
+    gap: SPACING.sm,
+  },
+  sparksSectionTitle: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    letterSpacing: 1.5,
+  },
+  sparkItem: {
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 8,
+    padding: SPACING.md,
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(255, 180, 100, 0.3)',
+    gap: 3,
+  },
+  sparkItemTitle: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
+  sparkItemContent: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    lineHeight: 16,
+  },
+  sparkItemDate: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+  },
+
+  // Develop further (bridge)
+  developSection: {
+    marginTop: SPACING.xl * 2,
+    alignItems: 'center',
+    gap: SPACING.md,
+  },
+  developDivider: {
+    width: 40,
+    height: 1,
+    backgroundColor: COLORS.emberOrange,
+    opacity: 0.2,
+  },
+  developButton: {
+    alignItems: 'center',
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.06)',
+    gap: SPACING.xs,
+  },
+  developButtonText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+  developButtonHint: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+    letterSpacing: 0.5,
+  },
+
+  // Completed movement indicators
+  completedMovement: {
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    gap: 2,
+  },
+  completedText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    opacity: 0.8,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+  completedHint: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+    letterSpacing: 0.5,
+  },
+
+  // Generate button (slightly different emphasis)
+  generateButton: {
+    borderColor: 'rgba(255, 107, 43, 0.4)',
+    backgroundColor: 'rgba(255, 107, 43, 0.1)',
+  },
+  generateButtonText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+
+  // Remove
+  removeButton: {
+    alignItems: 'center',
+    marginTop: SPACING.xl * 2,
+    marginBottom: SPACING.xl,
+    paddingVertical: SPACING.sm,
+  },
+  removeButtonText: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    letterSpacing: 1,
+    opacity: 0.5,
   },
 });
 

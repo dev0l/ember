@@ -1,9 +1,11 @@
+import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet } from 'react-native';
 
 import { COLORS } from '@/theme';
+import { migrateIfNeeded } from '@/services/migration';
 
 /**
  * Root Layout
@@ -17,6 +19,11 @@ import { COLORS } from '@/theme';
  * The warmth comes from the embers, not the background.
  */
 export default function RootLayout() {
+  // Run file → SQLite migration on first launch after database introduction
+  useEffect(() => {
+    migrateIfNeeded();
+  }, []);
+
   return (
     <GestureHandlerRootView style={styles.root}>
       <StatusBar style="light" />
