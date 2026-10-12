@@ -1,23 +1,16 @@
 // ─────────────────────────────────────────────
 // Ember Session Screen
 //
-// The enquiry interface. Where Sparks become attended to.
+// The enquiry interface. Where Sparks and Embers become attended to.
 //
-// Flow:
-//   1. Foundational questions (3, always asked)
-//   2. Choice: "Explore further" / "Generate from here"
-//   3. Exploratory questions (conditional, voluntary)
-//   4. Generate Design Pack
-//
-// Entry: always with an existing EmberProject ID.
-// The crossing from EmberSeed → EmberProject happens
-// in ember/[id].tsx before navigating here.
-//
-// "We don't necessarily need twenty-seven questions
-//  before allowing the poor human to proceed." 😂
+// Driven entirely by the pure Inquiry semantic engine:
+//   - Explore movement: establish purpose, audience/context, optional reflections
+//   - Develop movement: establish reach, platform, storage, offline, access, constraints
+//   - Candidate configuration adoption & review confirmation
+//   - Movement Available modal: human-readable progression inspection rebased on InquiryState
 // ─────────────────────────────────────────────
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -34,672 +27,494 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
-import type {
-  EmberProject,
-  EmberAnswer,
-  EstablishedCondition,
-} from '@/core/ember-project-types';
 import {
-  getFoundationalQuestions,
-  getAvailableExploratoryQuestions,
-  QUESTION_LIBRARY,
-} from '@/knowledge/questions';
-import type { AuthoredQuestion, QuestionChoice } from '@/knowledge/questions';
-import { evaluatePropositions, PROPOSITION_LIBRARY } from '@/knowledge/propositions';
-import { generateDesignPack } from '@/engine/design-pack-generator';
+  DEFAULT_LIBRARY,
+  evaluateInquiry,
+  nextQuestion,
+  chooseDesignPack,
+  adoptConfiguration,
+  confirmReview,
+  CAPABILITY_LABELS,
+  type InquiryQuestion,
+  type InquiryChoice,
+  type Movement,
+  type InquiryState,
+} from '@/inquiry';
 import {
-  saveProject,
-  loadProject,
-  saveDesignPack,
-} from '@/services/ember-project-storage';
-
-
-type SessionPhase =
-  | 'foundational'
-  | 'choice'
-  | 'exploratory'
-  | 'generating';
+  loadInquiryEvidence,
+  saveAnswer,
+  recordDecision,
+} from '@/services/inquiry-storage';
 
 export default function EmberSessionScreen() {
   const params = useLocalSearchParams<{
     id: string;
-    startPhase?: string;
+    movement?: string;
   }>();
 
-  // ── Derived question lists ──
-  const foundationalQuestions = useMemo(
-    () => getFoundationalQuestions(),
-    [],
-  );
+  const inquiryId = params.id;
+  const initialMovement: Movement = (params.movement as Movement) || 'explore';
+  const [movement, setMovement] = useState<Movement>(initialMovement);
 
-  const initialLoadedProject = useMemo(() => {
-    if (params.id) {
-      return loadProject(params.id);
-    }
-    return null;
-  }, [params.id]);
+  // Evidence and Engine State
+  const [evidence, setEvidence] = useState(() => loadInquiryEvidence(inquiryId));
+  const inquiryState: InquiryState = useMemo(() => {
+    return evaluateInquiry(evidence, DEFAULT_LIBRARY);
+  }, [evidence]);
 
-  // ── Session State ──
-  const [project, setProject] = useState<EmberProject | null>(initialLoadedProject);
+  // Current question driven by evaluator
+  const activeQuestion: InquiryQuestion | undefined = useMemo(() => {
+    return nextQuestion(inquiryState, movement, DEFAULT_LIBRARY);
+  }, [inquiryState, movement]);
 
-  const [phase, setPhase] = useState<SessionPhase>(() => {
-    // Direct entry into exploratory phase (from Ember View's "Explore Further")
-    if (
-      params.startPhase === 'exploratory' &&
-      initialLoadedProject &&
-      initialLoadedProject.answers.length >= foundationalQuestions.length
-    ) {
-      return 'exploratory';
-    }
-    if (
-      initialLoadedProject &&
-      initialLoadedProject.answers.length >= foundationalQuestions.length
-    ) {
-      return 'choice';
-    }
-    return 'foundational';
-  });
-
-  // Track current question index within current phase
-  const [questionIndex, setQuestionIndex] = useState(() => {
-    if (!initialLoadedProject) return 0;
-    if (initialLoadedProject.answers.length < foundationalQuestions.length) {
-      return initialLoadedProject.answers.length;
-    }
-    return 0;
-  });
+  // Form input state
   const [currentAnswer, setCurrentAnswer] = useState('');
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
+  const [specificationText, setSpecificationText] = useState('');
 
-  const exploratoryQuestions = useMemo(() => {
-    if (!project) return [];
-    const conditions = project.conditions.map((c) => c.id);
-    return getAvailableExploratoryQuestions(
-      project.askedQuestionIds,
-      conditions,
-    );
-  }, [project]);
-
-  // ── Current question ──
-  const currentQuestion: AuthoredQuestion | null = useMemo(() => {
-    if (phase === 'foundational') {
-      return foundationalQuestions[questionIndex] ?? null;
-    }
-    if (phase === 'exploratory') {
-      return exploratoryQuestions[questionIndex] ?? null;
-    }
-    return null;
-  }, [phase, questionIndex, foundationalQuestions, exploratoryQuestions]);
-
-  // ── Handle generate ──
-  const handleGenerate = useCallback(
-    (proj?: EmberProject) => {
-      const p = proj ?? project;
-      if (!p) return;
-
-      setPhase('generating');
-
-      try {
-        const markdown = generateDesignPack(p);
-        const version = p.designPackVersion + 1;
-
-        saveDesignPack(p.id, version, markdown);
-
-        const updated: EmberProject = {
-          ...p,
-          status: 'generated',
-          designPackVersion: version,
-          updatedAt: new Date().toISOString(),
-        };
-        saveProject(updated);
-        setProject(updated);
-
-        // Navigate to the Design Pack view
-        router.replace({
-          pathname: '/(main)/design-pack/[id]',
-          params: { id: p.id },
-        } as any);
-      } catch (error) {
-        Alert.alert(
-          'Generation failed',
-          'Something went wrong generating the Design Pack.',
-        );
-        setPhase('choice');
-        if (__DEV__) {
-          console.error('🔥 [Ember] Design Pack generation error:', error);
-        }
-      }
-    },
-    [project],
-  );
-
-  // ── Handle answer submission ──
-  const handleAnswerSubmit = useCallback(() => {
-    if (!project || !currentQuestion) return;
-
-    const isChoice =
-      currentQuestion.answerType === 'choice' ||
-      currentQuestion.answerType === 'multi-choice';
-    const rawResponse = isChoice
-      ? selectedChoice ?? ''
-      : currentAnswer.trim();
-
-    if (!rawResponse) return;
-
-    // Build the answer
-    const answer: EmberAnswer = {
-      questionId: currentQuestion.id,
-      rawResponse,
-      dimensionId: currentQuestion.dimensionId,
-      value: rawResponse,
-      answeredAt: new Date().toISOString(),
-    };
-
-    // Establish conditions from choice answers
-    const newConditions: EstablishedCondition[] = [];
-    if (isChoice && currentQuestion.choices) {
-      const choice = currentQuestion.choices.find(
-        (c) => c.value === selectedChoice,
-      );
-      if (choice) {
-        for (const condId of choice.establishesConditions) {
-          newConditions.push({
-            id: condId,
-            label: condId.replace(/-/g, ' '),
-            confidence: 'established',
-            sourceAnswerIds: [currentQuestion.id],
-          });
-        }
-      }
-    }
-
-    // Update project
-    const updatedProject: EmberProject = {
-      ...project,
-      answers: [...project.answers, answer],
-      askedQuestionIds: [
-        ...project.askedQuestionIds,
-        currentQuestion.id,
-      ],
-      conditions: [...project.conditions, ...newConditions],
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Evaluate propositions with new conditions
-    const conditions = updatedProject.conditions.map((c) => c.id);
-    const evaluated = evaluatePropositions(conditions);
-    updatedProject.activatedPropositions = evaluated.map((e) => ({
-      propositionId: e.proposition.id,
-      confidence: e.confidence,
-      activatingConditionIds: e.matchingSupports,
-      conflictingConditionIds: e.activeConflicts,
-    }));
-
-    saveProject(updatedProject);
-    setProject(updatedProject);
-
-    // Reset answer state
-    setCurrentAnswer('');
-    setSelectedChoice(null);
-
-    // Advance to next question or return to Ember
-    if (phase === 'foundational') {
-      if (questionIndex + 1 < foundationalQuestions.length) {
-        setQuestionIndex(questionIndex + 1);
-      } else if (updatedProject.seedId) {
-        // Return to the Ember View — Develop is complete
-        router.back();
-      } else {
-        setPhase('choice');
-      }
-    } else if (phase === 'exploratory') {
-      // Re-evaluate available questions after this answer
-      const nextAvailable = getAvailableExploratoryQuestions(
-        updatedProject.askedQuestionIds,
-        conditions,
-      );
-      if (nextAvailable.length > 0) {
-        setQuestionIndex(0);
-      } else if (updatedProject.seedId) {
-        // Return to the Ember View — Explore is complete
-        router.back();
-      } else {
-        handleGenerate(updatedProject);
-      }
-    }
-  }, [
-    project,
-    currentQuestion,
-    currentAnswer,
-    selectedChoice,
-    phase,
-    questionIndex,
-    foundationalQuestions,
-    exploratoryQuestions,
-    handleGenerate,
-  ]);
-
-  // ── Handle explore further ──
-  const handleExploreFurther = useCallback(() => {
-    if (exploratoryQuestions.length === 0) {
-      handleGenerate();
-      return;
-    }
-    setQuestionIndex(0);
-    setPhase('exploratory');
-  }, [exploratoryQuestions, handleGenerate]);
-
-  // ── Guard: If exploratory phase has no available questions left ──
+  // Synchronize inputs when activeQuestion changes
   useEffect(() => {
-    if (phase === 'exploratory' && exploratoryQuestions.length === 0 && project) {
-      if (project.seedId) {
-        // Return to Ember View — no further exploration available
-        router.back();
+    if (activeQuestion) {
+      const existingAnswer = inquiryState.questions.find(q => q.id === activeQuestion.id)?.answer;
+      if (existingAnswer) {
+        if (activeQuestion.answerType === 'text') {
+          setCurrentAnswer(existingAnswer.value);
+        } else {
+          setSelectedChoice(existingAnswer.value);
+          setSpecificationText(existingAnswer.specification || '');
+        }
       } else {
-        handleGenerate(project);
+        setCurrentAnswer('');
+        setSelectedChoice(null);
+        setSpecificationText('');
       }
     }
-  }, [phase, exploratoryQuestions, project, handleGenerate]);
+  }, [activeQuestion, inquiryState.questions]);
 
-  // ── Movement Available — Experimental Surface ──
-  // "What movements are available from here?"
-  //
-  // This is instrumentation, not domain truth.
-  // The threshold of 2 conditions is deliberately arbitrary —
-  // enough to make the surface encounterable, not enough
-  // to claim we know what readiness means.
-  //
-  // Uncertainty conditions (platform-uncertain, persistence-uncertain,
-  // auth-deferred) are represented honestly as established conditions,
-  // not as absence or failure.
-  const MOVEMENT_THRESHOLD = 2; // Experimental — not domain truth
-
+  // Movement Available modal state
   const [showMovements, setShowMovements] = useState(false);
 
-  const movementState = useMemo(() => {
-    if (!project) return null;
+  // Guarded single return to Ember View
+  const hasReturnedRef = useRef(false);
+  const returnToEmber = useCallback(() => {
+    if (hasReturnedRef.current) return;
+    hasReturnedRef.current = true;
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/');
+    }
+  }, []);
 
-    const conditions = project.conditions;
-    const conditionIds = conditions.map(c => c.id);
-    const evaluated = evaluatePropositions(conditionIds);
+  // Submit answer
+  const handleAnswerSubmit = useCallback(() => {
+    if (!activeQuestion) return;
 
-    // Distinguish condition-driven propositions from unconditional ones
-    const conditionDriven = evaluated.filter(
-      e => e.proposition.supportingConditions.length > 0,
+    const isChoice = activeQuestion.answerType === 'choice';
+    const value = isChoice ? (selectedChoice ?? '') : currentAnswer.trim();
+    if (!value) return;
+
+    const chosenChoice = isChoice ? activeQuestion.choices?.find(c => c.value === value) : undefined;
+    if (chosenChoice?.requiresSpecification && !specificationText.trim()) {
+      Alert.alert('Specification required', 'Please provide additional details for this choice.');
+      return;
+    }
+
+    saveAnswer(inquiryId, activeQuestion.id, value, {
+      specification: chosenChoice?.requiresSpecification ? specificationText.trim() : undefined,
+      rawResponse: isChoice ? chosenChoice?.label : value,
+      answeredAt: new Date().toISOString(),
+    });
+
+    // Refresh evidence
+    const nextEvidence = loadInquiryEvidence(inquiryId);
+    setEvidence(nextEvidence);
+
+    // Reset inputs
+    setCurrentAnswer('');
+    setSelectedChoice(null);
+    setSpecificationText('');
+
+    // If in Explore and purpose + audience just became established, return or stay?
+    // User can continue exploring optional questions, or return.
+  }, [inquiryId, activeQuestion, selectedChoice, currentAnswer, specificationText]);
+
+  // Adopt configuration act
+  const handleAdoptConfig = useCallback((cfgId: string) => {
+    const decision = adoptConfiguration(inquiryState, cfgId, new Date().toISOString());
+    if (decision) {
+      recordDecision(inquiryId, decision);
+      setEvidence(loadInquiryEvidence(inquiryId));
+    }
+  }, [inquiryId, inquiryState]);
+
+  // Confirm review act
+  const handleConfirmReview = useCallback(() => {
+    const decision = confirmReview(inquiryState, new Date().toISOString());
+    if (decision) {
+      recordDecision(inquiryId, decision);
+      setEvidence(loadInquiryEvidence(inquiryId));
+      // Warrant is achieved! Return to Ember View
+      returnToEmber();
+    }
+  }, [inquiryId, inquiryState, returnToEmber]);
+
+  // Actionable crossing from Movement Available modal: choose Design Pack
+  const handleModalChooseDesignPack = useCallback(() => {
+    const decision = chooseDesignPack(inquiryState, new Date().toISOString());
+    if (decision) {
+      recordDecision(inquiryId, decision);
+      setEvidence(loadInquiryEvidence(inquiryId));
+      setShowMovements(false);
+      setMovement('develop');
+    }
+  }, [inquiryId, inquiryState]);
+
+  // Selected choice object for rendering specification input
+  const activeChoiceObj: InquiryChoice | undefined = useMemo(() => {
+    if (!activeQuestion || !selectedChoice) return undefined;
+    return activeQuestion.choices?.find(c => c.value === selectedChoice);
+  }, [activeQuestion, selectedChoice]);
+
+  // Candidate configurations for adoption
+  const candidateConfigs = useMemo(() => {
+    return DEFAULT_LIBRARY.configurations.filter(c =>
+      inquiryState.designPack.candidates.includes(c.id),
     );
-    const unconditional = evaluated.filter(
-      e => e.proposition.supportingConditions.length === 0,
-    );
+  }, [inquiryState.designPack.candidates]);
 
-    // Which conditions actually participate in proposition evaluation?
-    const allReferencedConditions = new Set(
-      PROPOSITION_LIBRARY.flatMap(p => [
-        ...p.supportingConditions,
-        ...p.conflictingConditions,
-      ]),
-    );
-    const consumed = conditions.filter(c => allReferencedConditions.has(c.id));
-    const unconsumed = conditions.filter(c => !allReferencedConditions.has(c.id));
+  return (
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.flex}
+      >
+        {/* Header bar */}
+        <View style={styles.headerBar}>
+          <Pressable onPress={returnToEmber} hitSlop={12}>
+            <Text style={styles.backArrow}>←</Text>
+          </Pressable>
+          <Text style={styles.headerTitle}>
+            {movement === 'explore' ? 'Explore' : 'Develop'}
+          </Text>
+          <Pressable onPress={returnToEmber} hitSlop={12}>
+            <Text style={styles.doneText}>Done</Text>
+          </Pressable>
+        </View>
 
-    // Experimental threshold for Design Pack being "meaningfully available"
-    const designPackMeaningful = conditions.length >= MOVEMENT_THRESHOLD;
-
-    return {
-      conditions,
-      consumed,
-      unconsumed,
-      conditionDriven,
-      unconditional,
-      designPackMeaningful,
-    };
-  }, [project]);
-
-  // ── Render: Question Phase (Foundational or Exploratory) ──
-  if (
-    (phase === 'foundational' || phase === 'exploratory') &&
-    currentQuestion
-  ) {
-    const totalInPhase =
-      phase === 'foundational'
-        ? foundationalQuestions.length
-        : exploratoryQuestions.length;
-
-    return (
-      <SafeAreaView style={styles.container}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.flex}
+        <ScrollView
+          contentContainerStyle={styles.phaseContent}
+          keyboardShouldPersistTaps="handled"
         >
-          <ScrollView
-            contentContainerStyle={styles.phaseContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            {/* Progress indicator */}
-            <View style={styles.progressRow}>
-              <Text style={styles.progressText}>
-                {phase === 'foundational'
-                  ? 'Foundation'
-                  : 'Exploring further'}
-              </Text>
-              <Text style={styles.progressCount}>
-                {questionIndex + 1} / {totalInPhase}
-              </Text>
-            </View>
+          {activeQuestion ? (
+            <>
+              {/* Progress indicator */}
+              <View style={styles.progressRow}>
+                <Text style={styles.progressText}>
+                  {movement === 'explore'
+                    ? activeQuestion.role === 'required'
+                      ? 'Explore · Foundation'
+                      : 'Explore · Optional'
+                    : 'Develop · Requirement'}
+                </Text>
+                <Text style={styles.progressCount}>
+                  {activeQuestion.role === 'optional' ? 'Optional' : 'Required'}
+                </Text>
+              </View>
 
-            {/* Question */}
-            <Text style={styles.questionText}>
-              {currentQuestion.text}
-            </Text>
+              {/* Question text */}
+              <Text style={styles.questionText}>
+                {activeQuestion.text}
+              </Text>
 
-            {/* Answer input */}
-            {currentQuestion.answerType === 'text' ? (
-              <TextInput
-                style={[styles.textInput, styles.multilineInput]}
-                value={currentAnswer}
-                onChangeText={setCurrentAnswer}
-                placeholder={
-                  currentQuestion.placeholder ?? 'Your thoughts...'
-                }
-                placeholderTextColor={COLORS.textMuted}
-                multiline
-                textAlignVertical="top"
-                autoFocus
-              />
-            ) : (
-              <View style={styles.choicesContainer}>
-                {currentQuestion.choices?.map(
-                  (choice: QuestionChoice) => (
+              {/* Question input */}
+              {activeQuestion.answerType === 'text' ? (
+                <TextInput
+                  style={[styles.textInput, styles.multilineInput]}
+                  value={currentAnswer}
+                  onChangeText={setCurrentAnswer}
+                  placeholder={activeQuestion.placeholder ?? 'Your thoughts...'}
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                  textAlignVertical="top"
+                  autoFocus
+                />
+              ) : (
+                <View style={styles.choicesContainer}>
+                  {activeQuestion.choices?.map((choice) => (
                     <Pressable
                       key={choice.value}
                       onPress={() => setSelectedChoice(choice.value)}
                       style={[
                         styles.choicePill,
-                        selectedChoice === choice.value &&
-                          styles.choicePillSelected,
+                        selectedChoice === choice.value && styles.choicePillSelected,
                       ]}
                     >
                       <Text
                         style={[
                           styles.choicePillText,
-                          selectedChoice === choice.value &&
-                            styles.choicePillTextSelected,
+                          selectedChoice === choice.value && styles.choicePillTextSelected,
                         ]}
                       >
                         {choice.label}
                       </Text>
                     </Pressable>
-                  ),
-                )}
-              </View>
-            )}
+                  ))}
 
-            {/* Submit */}
-            <Pressable
-              onPress={handleAnswerSubmit}
-              style={[
-                styles.primaryButton,
-                !(currentAnswer.trim() || selectedChoice) &&
-                  styles.buttonDisabled,
-              ]}
-              disabled={!(currentAnswer.trim() || selectedChoice)}
-            >
-              <Text style={styles.primaryButtonText}>Continue</Text>
-            </Pressable>
-
-            {/* ── Movement Available (Experimental) ── */}
-            {movementState && movementState.conditions.length > 0 && (
-              <Pressable
-                onPress={() => setShowMovements(true)}
-                style={styles.movementIndicator}
-              >
-                <Text style={styles.movementIndicatorText}>
-                  {movementState.conditions.length} condition{movementState.conditions.length !== 1 ? 's' : ''} established
-                </Text>
-                <Text style={styles.movementIndicatorHint}>
-                  {movementState.conditionDriven.length > 0
-                    ? `${movementState.conditionDriven.length} proposition${movementState.conditionDriven.length !== 1 ? 's' : ''} active`
-                    : 'No propositions yet'}
-                  {' · tap to see'}
-                </Text>
-              </Pressable>
-            )}
-
-            {/* Movement Modal */}
-            <Modal
-              visible={showMovements}
-              transparent
-              animationType="slide"
-              onRequestClose={() => setShowMovements(false)}
-            >
-              <View style={styles.movementOverlay}>
-                <View style={styles.movementModal}>
-                  <ScrollView>
-                    <Text style={styles.movementTitle}>
-                      What has been established
-                    </Text>
-
-                    {/* Conditions — consumed by the engine */}
-                    {movementState && movementState.consumed.length > 0 && (
-                      <View style={styles.movementSection}>
-                        <Text style={styles.movementSectionLabel}>
-                          Conditions the engine can evaluate
-                        </Text>
-                        {movementState.consumed.map(c => (
-                          <Text key={c.id} style={styles.movementCondition}>
-                            ✓ {c.label}
-                          </Text>
-                        ))}
-                      </View>
-                    )}
-
-                    {/* Conditions — not consumed (including uncertainty) */}
-                    {movementState && movementState.unconsumed.length > 0 && (
-                      <View style={styles.movementSection}>
-                        <Text style={styles.movementSectionLabel}>
-                          Established but not yet evaluated
-                        </Text>
-                        <Text style={styles.movementSectionHint}>
-                          Honest positions — the engine has no authored knowledge about what these imply
-                        </Text>
-                        {movementState.unconsumed.map(c => (
-                          <Text key={c.id} style={styles.movementConditionMuted}>
-                            ~ {c.label}
-                          </Text>
-                        ))}
-                      </View>
-                    )}
-
-                    {/* Active propositions */}
-                    {movementState && movementState.conditionDriven.length > 0 && (
-                      <View style={styles.movementSection}>
-                        <Text style={styles.movementSectionLabel}>
-                          Propositions from conditions
-                        </Text>
-                        {movementState.conditionDriven.map(e => (
-                          <View key={e.proposition.id} style={styles.movementProposition}>
-                            <Text style={styles.movementPropositionName}>
-                              {e.confidence === 'established' ? '✓' : '~'} {e.proposition.name}
-                            </Text>
-                            <Text style={styles.movementPropositionReason}>
-                              {e.proposition.reasoning}
-                            </Text>
-                            {e.activeConflicts.length > 0 && (
-                              <Text style={styles.movementConflict}>
-                                ⚠ Tension: {e.activeConflicts.join(', ')}
-                              </Text>
-                            )}
-                          </View>
-                        ))}
-                      </View>
-                    )}
-
-                    {/* Unconditional propositions */}
-                    {movementState && movementState.unconditional.length > 0 && (
-                      <View style={styles.movementSection}>
-                        <Text style={styles.movementSectionLabel}>
-                          Always available
-                        </Text>
-                        {movementState.unconditional.map(e => (
-                          <Text key={e.proposition.id} style={styles.movementConditionMuted}>
-                            {e.proposition.name}
-                          </Text>
-                        ))}
-                      </View>
-                    )}
-
-                    {/* Available movements */}
-                    <View style={[styles.movementSection, styles.movementDivider]}>
-                      <Text style={styles.movementSectionLabel}>
-                        Available movements
-                      </Text>
-                      <View style={styles.movementItem}>
-                        <Text style={[
-                          styles.movementItemName,
-                          movementState?.designPackMeaningful && styles.movementItemAvailable,
-                        ]}>
-                          {movementState?.designPackMeaningful ? '◆' : '◇'} Design Pack
-                        </Text>
-                        <Text style={styles.movementItemHint}>
-                          {movementState?.designPackMeaningful
-                            ? `${movementState.conditionDriven.length} condition-driven proposition${movementState.conditionDriven.length !== 1 ? 's' : ''} would be included`
-                            : `Fewer than ${MOVEMENT_THRESHOLD} conditions — not yet meaningfully grounded`}
-                        </Text>
-                      </View>
+                  {/* Specification text input if selected choice requires specification */}
+                  {activeChoiceObj?.requiresSpecification && (
+                    <View style={styles.specContainer}>
+                      <Text style={styles.specLabel}>Please specify:</Text>
+                      <TextInput
+                        style={styles.textInput}
+                        value={specificationText}
+                        onChangeText={setSpecificationText}
+                        placeholder="Name or details..."
+                        placeholderTextColor={COLORS.textMuted}
+                        autoFocus
+                      />
                     </View>
+                  )}
+                </View>
+              )}
 
-                    <Text style={styles.movementFooter}>
-                      This surface is experimental. The threshold is instrumentation, not domain truth.
+              {/* Submit */}
+              <Pressable
+                onPress={handleAnswerSubmit}
+                style={[
+                  styles.primaryButton,
+                  !(
+                    (activeQuestion.answerType === 'text' && currentAnswer.trim()) ||
+                    (activeQuestion.answerType === 'choice' &&
+                      selectedChoice &&
+                      (!activeChoiceObj?.requiresSpecification || specificationText.trim()))
+                  ) && styles.buttonDisabled,
+                ]}
+                disabled={
+                  !(
+                    (activeQuestion.answerType === 'text' && currentAnswer.trim()) ||
+                    (activeQuestion.answerType === 'choice' &&
+                      selectedChoice &&
+                      (!activeChoiceObj?.requiresSpecification || specificationText.trim()))
+                  )
+                }
+              >
+                <Text style={styles.primaryButtonText}>Save & Continue</Text>
+              </Pressable>
+            </>
+          ) : movement === 'develop' && inquiryState.designPack.chosen ? (
+            /* Develop finished: Adoption & Review confirmation steps */
+            <View style={styles.finishContainer}>
+              {inquiryState.designPack.blockers.length > 0 ? (
+                <View style={styles.blockerCard}>
+                  <Text style={styles.blockerTitle}>Active Technical Blockers</Text>
+                  {inquiryState.designPack.blockers.map((b, idx) => (
+                    <Text key={idx} style={styles.blockerDetail}>
+                      • {b.detail}
                     </Text>
-                  </ScrollView>
-
+                  ))}
+                </View>
+              ) : !inquiryState.designPack.adoptedConfigurationId ? (
+                <View style={styles.adoptionSection}>
+                  <Text style={styles.finishTitle}>Adopt Architecture Configuration</Text>
+                  <Text style={styles.finishHint}>
+                    The following authored configurations satisfy your requirements:
+                  </Text>
+                  {candidateConfigs.map((cfg) => (
+                    <Pressable
+                      key={cfg.id}
+                      onPress={() => handleAdoptConfig(cfg.id)}
+                      style={styles.configCard}
+                    >
+                      <Text style={styles.configName}>{cfg.name}</Text>
+                      <Text style={styles.configSummary}>{cfg.summary}</Text>
+                      <Text style={styles.configAdoptAction}>Tap to adopt</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : !inquiryState.designPack.reviewCurrent ? (
+                <View style={styles.reviewSection}>
+                  <Text style={styles.finishTitle}>Confirm Design Scope</Text>
+                  <Text style={styles.finishHint}>
+                    Adopted Configuration: {inquiryState.designPack.adoptedConfigurationId}
+                  </Text>
+                  <Text style={styles.finishBody}>
+                    Confirm that recorded technical requirements accurately reflect the initial version.
+                  </Text>
                   <Pressable
-                    onPress={() => setShowMovements(false)}
-                    style={styles.movementClose}
+                    onPress={handleConfirmReview}
+                    style={styles.primaryButton}
                   >
-                    <Text style={styles.movementCloseText}>Close</Text>
+                    <Text style={styles.primaryButtonText}>Confirm Review</Text>
                   </Pressable>
                 </View>
-              </View>
-            </Modal>
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    );
-  }
-
-  // ── Render: Choice Phase ──
-  if (phase === 'choice') {
-    const hasMoreQuestions = exploratoryQuestions.length > 0;
-
-    return (
-      <SafeAreaView style={styles.container}>
-        <ScrollView contentContainerStyle={styles.phaseContent}>
-          <Text style={styles.phaseTitle}>
-            Foundation established
-          </Text>
-          <Text style={styles.phaseSubtitle}>
-            {project?.conditions.length ?? 0} conditions ·{' '}
-            {project?.activatedPropositions.length ?? 0} propositions
-            active
-          </Text>
-
-          <View style={styles.choiceSection}>
-            {hasMoreQuestions && (
+              ) : (
+                <View style={styles.reviewSection}>
+                  <Text style={styles.finishTitle}>Develop Warranted</Text>
+                  <Text style={styles.finishBody}>
+                    Your technical enquiry is complete and warranted for Design Pack generation.
+                  </Text>
+                  <Pressable onPress={returnToEmber} style={styles.primaryButton}>
+                    <Text style={styles.primaryButtonText}>Return to Ember</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
+          ) : (
+            /* Explore movement finished or all questions answered */
+            <View style={styles.finishContainer}>
+              <Text style={styles.finishTitle}>Explore Movement Complete</Text>
+              <Text style={styles.finishBody}>
+                {inquiryState.designPack.available
+                  ? 'Purpose and audience established. Design Pack is now available.'
+                  : 'You have answered all available questions in this movement.'}
+              </Text>
+              {inquiryState.designPack.available && !inquiryState.designPack.chosen && (
+                <Pressable
+                  onPress={handleModalChooseDesignPack}
+                  style={[styles.primaryButton, { marginTop: SPACING.md }]}
+                >
+                  <Text style={styles.primaryButtonText}>Choose Design Pack & Begin Develop</Text>
+                </Pressable>
+              )}
               <Pressable
-                onPress={handleExploreFurther}
-                style={styles.choiceButton}
+                onPress={returnToEmber}
+                style={[styles.secondaryButton, { marginTop: SPACING.md }]}
               >
-                <Text style={styles.choiceButtonTitle}>
-                  Explore further
-                </Text>
-                <Text style={styles.choiceButtonHint}>
-                  {exploratoryQuestions.length} more question
-                  {exploratoryQuestions.length !== 1 ? 's' : ''}{' '}
-                  available
-                </Text>
+                <Text style={styles.secondaryButtonText}>Return to Ember</Text>
               </Pressable>
-            )}
-
-            <Pressable
-              onPress={() => handleGenerate()}
-              style={[
-                styles.choiceButton,
-                styles.choiceButtonPrimary,
-              ]}
-            >
-              <Text style={styles.choiceButtonTitlePrimary}>
-                {project?.designPackVersion ? 'Regenerate Design Pack' : 'Generate Design Pack'}
-              </Text>
-              <Text style={styles.choiceButtonHintPrimary}>
-                From what has been established so far
-              </Text>
-            </Pressable>
-
-            {project && project.designPackVersion > 0 && (
-              <Pressable
-                onPress={() => {
-                  router.push({
-                    pathname: '/(main)/design-pack/[id]',
-                    params: { id: project.id },
-                  } as any);
-                }}
-                style={styles.choiceButton}
-              >
-                <Text style={styles.choiceButtonTitle}>
-                  View Current Design Pack (v{project.designPackVersion})
-                </Text>
-                <Text style={styles.choiceButtonHint}>
-                  Inspect the latest generated Markdown
-                </Text>
-              </Pressable>
-            )}
-          </View>
-
-          {/* Quick summary of what's been established */}
-          {project && project.answers.length > 0 && (
-            <View style={styles.summarySection}>
-              <Text style={styles.summaryTitle}>
-                What you've shared:
-              </Text>
-              {project.answers.map((answer) => {
-                const q = QUESTION_LIBRARY.find(
-                  (qu) => qu.id === answer.questionId,
-                );
-                return (
-                  <View key={answer.questionId} style={styles.summaryItem}>
-                    <Text style={styles.summaryQuestion}>
-                      {q?.text ?? answer.questionId}
-                    </Text>
-                    <Text style={styles.summaryAnswer}>
-                      {answer.rawResponse}
-                    </Text>
-                  </View>
-                );
-              })}
             </View>
           )}
+
+          {/* ── Movement Available Inspection Surface ── */}
+          {inquiryState.conditions.length > 0 && (
+            <Pressable
+              onPress={() => setShowMovements(true)}
+              style={styles.movementIndicator}
+            >
+              <Text style={styles.movementIndicatorText}>
+                {inquiryState.conditions.length} condition{inquiryState.conditions.length !== 1 ? 's' : ''} established
+              </Text>
+              <Text style={styles.movementIndicatorHint}>
+                {inquiryState.designPack.warranted
+                  ? 'Warranted · tap to inspect'
+                  : inquiryState.designPack.available
+                  ? 'Design Pack available · tap to inspect'
+                  : 'Tap to inspect progression'}
+              </Text>
+            </Pressable>
+          )}
+
+          {/* ── Movement Modal (Rebased onto InquiryState) ── */}
+          <Modal
+            visible={showMovements}
+            transparent
+            animationType="slide"
+            onRequestClose={() => setShowMovements(false)}
+          >
+            <View style={styles.movementOverlay}>
+              <View style={styles.movementModal}>
+                <ScrollView>
+                  <Text style={styles.movementTitle}>
+                    What has been established
+                  </Text>
+
+                  {/* Conditions section */}
+                  <View style={styles.movementSection}>
+                    <Text style={styles.movementSectionLabel}>
+                      Established Conditions ({inquiryState.conditions.length})
+                    </Text>
+                    {inquiryState.conditions.map((cond) => (
+                      <Text key={cond} style={styles.movementCondition}>
+                        ✓ {cond.replace(/-/g, ' ')}
+                      </Text>
+                    ))}
+                  </View>
+
+                  {/* Required capabilities */}
+                  {inquiryState.designPack.requiredCapabilities.length > 0 && (
+                    <View style={styles.movementSection}>
+                      <Text style={styles.movementSectionLabel}>
+                        Required Capabilities
+                      </Text>
+                      {inquiryState.designPack.requiredCapabilities.map((cap) => (
+                        <Text key={cap} style={styles.movementCondition}>
+                          • {CAPABILITY_LABELS[cap] ?? cap}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Blockers */}
+                  {inquiryState.designPack.blockers.length > 0 && (
+                    <View style={styles.movementSection}>
+                      <Text style={styles.movementSectionLabel}>
+                        Blockers
+                      </Text>
+                      {inquiryState.designPack.blockers.map((b, idx) => (
+                        <Text key={idx} style={styles.movementConflict}>
+                          ⚠ {b.detail}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Available Movement */}
+                  <View style={[styles.movementSection, styles.movementDivider]}>
+                    <Text style={styles.movementSectionLabel}>
+                      Available Movements
+                    </Text>
+                    <View style={styles.movementItem}>
+                      <Text
+                        style={[
+                          styles.movementItemName,
+                          inquiryState.designPack.available && styles.movementItemAvailable,
+                        ]}
+                      >
+                        {inquiryState.designPack.available ? '◆' : '◇'} Design Pack
+                      </Text>
+                      <Text style={styles.movementItemHint}>
+                        {inquiryState.designPack.warranted
+                          ? 'Warranted for generation.'
+                          : inquiryState.designPack.chosen
+                          ? 'Chosen · developing technical requirements.'
+                          : inquiryState.designPack.available
+                          ? 'Available from established purpose and audience.'
+                          : 'Explore purpose and audience to make available.'}
+                      </Text>
+                    </View>
+
+                    {/* Actionable crossing inside modal */}
+                    {inquiryState.designPack.available && !inquiryState.designPack.chosen && (
+                      <Pressable
+                        onPress={handleModalChooseDesignPack}
+                        style={[styles.primaryButton, { marginTop: SPACING.md }]}
+                      >
+                        <Text style={styles.primaryButtonText}>
+                          Choose Design Pack & Begin Develop
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+
+                  <Text style={styles.movementFooter}>
+                    Truthful engine assessment from current evidence.
+                  </Text>
+                </ScrollView>
+
+                <Pressable
+                  onPress={() => setShowMovements(false)}
+                  style={styles.movementClose}
+                >
+                  <Text style={styles.movementCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </View>
+          </Modal>
         </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  // ── Render: Generating ──
-  if (phase === 'generating') {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.generatingContainer}>
-          <Text style={styles.generatingText}>
-            Generating Design Pack...
-          </Text>
-          <Text style={styles.generatingSubtext}>
-            Mapping conditions to propositions
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  return null;
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
 }
 
 // ─────────────────────────────────────────────
@@ -712,78 +527,39 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
+  // Header
+  headerBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.1)',
+  },
+  backArrow: {
+    fontSize: 20,
+    color: COLORS.emberOrange,
+    paddingHorizontal: SPACING.sm,
+  },
+  headerTitle: {
+    fontSize: TYPOGRAPHY.sizes.md,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    letterSpacing: TYPOGRAPHY.letterSpacing.normal,
+  },
+  doneText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    paddingHorizontal: SPACING.sm,
+  },
+
   // Phase content
   phaseContent: {
     paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.xl * 2,
+    paddingTop: SPACING.xl,
     paddingBottom: SPACING.xl * 3,
-  },
-  phaseTitle: {
-    fontSize: TYPOGRAPHY.sizes.xl,
-    fontWeight: '300',
-    color: COLORS.emberOrange,
-    letterSpacing: TYPOGRAPHY.letterSpacing.extraWide,
-    marginBottom: SPACING.xs,
-  },
-  phaseSubtitle: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textMuted,
-    marginBottom: SPACING.xl * 2,
-  },
-
-  // Material preview
-  materialPreview: {
-    backgroundColor: COLORS.surfaceDark,
-    borderRadius: 12,
-    padding: SPACING.md,
-    marginBottom: SPACING.xl,
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.emberOrange,
-  },
-  materialLabel: {
-    fontSize: 9,
-    fontWeight: '700',
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1.5,
-    marginBottom: SPACING.xs,
-  },
-  materialText: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textSecondary,
-    lineHeight: 20,
-    fontStyle: 'italic',
-  },
-
-  // Input
-  inputSection: {
-    marginBottom: SPACING.xl,
-  },
-  inputLabel: {
-    fontSize: TYPOGRAPHY.sizes.md,
-    fontWeight: '500',
-    color: COLORS.textPrimary,
-    marginBottom: SPACING.xs,
-  },
-  inputHint: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.textMuted,
-    fontStyle: 'italic',
-    marginBottom: SPACING.md,
-  },
-  textInput: {
-    backgroundColor: COLORS.surfaceDark,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 107, 43, 0.12)',
-    borderRadius: 10,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textPrimary,
-  },
-  multilineInput: {
-    minHeight: 100,
-    paddingTop: SPACING.sm + 2,
   },
 
   // Progress
@@ -815,6 +591,22 @@ const styles = StyleSheet.create({
     letterSpacing: TYPOGRAPHY.letterSpacing.normal,
   },
 
+  // Inputs
+  textInput: {
+    backgroundColor: COLORS.surfaceDark,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.12)',
+    borderRadius: 10,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm + 2,
+    fontSize: TYPOGRAPHY.sizes.sm,
+    color: COLORS.textPrimary,
+  },
+  multilineInput: {
+    minHeight: 120,
+    paddingTop: SPACING.sm + 2,
+  },
+
   // Choices
   choicesContainer: {
     gap: SPACING.sm,
@@ -841,6 +633,17 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
+  // Specification input
+  specContainer: {
+    marginTop: SPACING.md,
+    gap: SPACING.xs,
+  },
+  specLabel: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+
   // Buttons
   primaryButton: {
     alignSelf: 'center',
@@ -856,91 +659,107 @@ const styles = StyleSheet.create({
     color: COLORS.deepCharcoal,
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
   },
+  secondaryButton: {
+    alignSelf: 'center',
+    paddingVertical: SPACING.sm + 2,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.3)',
+  },
+  secondaryButtonText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+  },
   buttonDisabled: {
     opacity: 0.4,
   },
 
-  // Choice phase
-  choiceSection: {
+  // Finish container
+  finishContainer: {
+    alignItems: 'center',
     gap: SPACING.md,
-    marginBottom: SPACING.xl * 2,
+    paddingVertical: SPACING.xl,
   },
-  choiceButton: {
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.lg,
-    borderRadius: 16,
+  finishTitle: {
+    fontSize: TYPOGRAPHY.sizes.lg,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+    textAlign: 'center',
+  },
+  finishHint: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginBottom: SPACING.md,
+  },
+  finishBody: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  // Blocker card
+  blockerCard: {
+    backgroundColor: 'rgba(230, 80, 50, 0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(230, 80, 50, 0.3)',
+    padding: SPACING.md,
+    gap: SPACING.xs,
+    width: '100%',
+  },
+  blockerTitle: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '700',
+    color: '#FF6B6B',
+  },
+  blockerDetail: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    lineHeight: 16,
+  },
+
+  // Config adoption cards
+  adoptionSection: {
+    width: '100%',
+    gap: SPACING.md,
+  },
+  configCard: {
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: 'rgba(255, 107, 43, 0.2)',
-    backgroundColor: COLORS.surfaceDark,
-    gap: SPACING.xs,
+    padding: SPACING.md,
+    gap: 4,
   },
-  choiceButtonPrimary: {
-    borderColor: COLORS.emberOrange,
-    backgroundColor: 'rgba(255, 107, 43, 0.1)',
-  },
-  choiceButtonTitle: {
-    fontSize: TYPOGRAPHY.sizes.md,
+  configName: {
+    fontSize: TYPOGRAPHY.sizes.sm,
     fontWeight: '600',
     color: COLORS.textPrimary,
   },
-  choiceButtonTitlePrimary: {
-    fontSize: TYPOGRAPHY.sizes.md,
-    fontWeight: '600',
-    color: COLORS.emberOrange,
-  },
-  choiceButtonHint: {
+  configSummary: {
     fontSize: TYPOGRAPHY.sizes.xs,
     color: COLORS.textMuted,
+    lineHeight: 16,
   },
-  choiceButtonHintPrimary: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.textSecondary,
-  },
-
-  // Summary
-  summarySection: {
-    gap: SPACING.md,
-  },
-  summaryTitle: {
-    fontSize: 9,
+  configAdoptAction: {
+    fontSize: 10,
     fontWeight: '700',
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1.5,
-  },
-  summaryItem: {
-    gap: 2,
-  },
-  summaryQuestion: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.textMuted,
-    fontStyle: 'italic',
-  },
-  summaryAnswer: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textSecondary,
-    lineHeight: 18,
-  },
-
-  // Generating
-  generatingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: SPACING.md,
-  },
-  generatingText: {
-    fontSize: TYPOGRAPHY.sizes.md,
     color: COLORS.emberOrange,
-    fontWeight: '300',
-    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
-  },
-  generatingSubtext: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.textMuted,
+    marginTop: 4,
   },
 
-  // Movement Available (Experimental)
+  // Review section
+  reviewSection: {
+    width: '100%',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+
+  // Movement indicator
   movementIndicator: {
     marginTop: SPACING.xl * 2,
     padding: SPACING.md,
@@ -998,42 +817,15 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginBottom: 2,
   },
-  movementSectionHint: {
-    fontSize: 10,
-    color: COLORS.textMuted,
-    fontStyle: 'italic',
-    marginBottom: SPACING.xs,
-  },
   movementCondition: {
     fontSize: TYPOGRAPHY.sizes.sm,
     color: COLORS.textPrimary,
     paddingVertical: 2,
   },
-  movementConditionMuted: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    color: COLORS.textMuted,
-    paddingVertical: 2,
-  },
-  movementProposition: {
-    backgroundColor: COLORS.surfaceDark,
-    borderRadius: 10,
-    padding: SPACING.sm,
-    gap: 4,
-  },
-  movementPropositionName: {
-    fontSize: TYPOGRAPHY.sizes.sm,
-    fontWeight: '600',
-    color: COLORS.textPrimary,
-  },
-  movementPropositionReason: {
-    fontSize: 11,
-    color: COLORS.textSecondary,
-    lineHeight: 16,
-  },
   movementConflict: {
-    fontSize: 10,
+    fontSize: 11,
     color: '#F5A623',
-    fontStyle: 'italic',
+    lineHeight: 16,
   },
   movementDivider: {
     borderTopWidth: 1,

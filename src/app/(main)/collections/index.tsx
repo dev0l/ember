@@ -5,7 +5,7 @@
 // from device storage.
 // ─────────────────────────────────────────────
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, FlatList, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, router } from 'expo-router';
@@ -31,6 +31,16 @@ export default function CollectionsScreen() {
       setProjects(loadedProjects);
     }, []),
   );
+
+  // Legacy = Inquiries with no Ember (seedless). Seed-linked Inquiries are
+  // reached through their Ember, so the Legacy tab lists only these.
+  const legacyProjects = useMemo(
+    () => projects.filter((p) => !p.seedId),
+    [projects],
+  );
+  // If no legacy projects exist the tab switcher is hidden; never leave
+  // the hidden Legacy tab selected.
+  const activeTab = legacyProjects.length > 0 ? tab : 'seeds';
 
   const handleOpenEmber = useCallback((id: string) => {
     router.push(`/(main)/ember/${id}` as any);
@@ -106,33 +116,33 @@ export default function CollectionsScreen() {
       {/* ── Segment / Tab Switcher ──
            Only show Enquiries tab when legacy projects (without seedId) exist.
            Modern projects are accessible through their Embers via Ember View. */}
-      {projects.some((p) => !p.seedId) && (
+      {legacyProjects.length > 0 && (
         <View style={styles.tabsContainer}>
           <Pressable
-            style={[styles.tabButton, tab === 'seeds' && styles.tabButtonActive]}
+            style={[styles.tabButton, activeTab === 'seeds' && styles.tabButtonActive]}
             onPress={() => setTab('seeds')}
           >
             <Text
-              style={[styles.tabText, tab === 'seeds' && styles.tabTextActive]}
+              style={[styles.tabText, activeTab === 'seeds' && styles.tabTextActive]}
             >
               Embers ({embers.length})
             </Text>
           </Pressable>
           <Pressable
-            style={[styles.tabButton, tab === 'projects' && styles.tabButtonActive]}
+            style={[styles.tabButton, activeTab === 'projects' && styles.tabButtonActive]}
             onPress={() => setTab('projects')}
           >
             <Text
-              style={[styles.tabText, tab === 'projects' && styles.tabTextActive]}
+              style={[styles.tabText, activeTab === 'projects' && styles.tabTextActive]}
             >
-              Legacy ({projects.filter((p) => !p.seedId).length})
+              Legacy ({legacyProjects.length})
             </Text>
           </Pressable>
         </View>
       )}
 
       {/* ── Tab Content: Embers (Seeds) ── */}
-      {tab === 'seeds' && (
+      {activeTab === 'seeds' && (
         <>
           {embers.length === 0 ? (
             <View style={styles.emptyContainer}>
@@ -201,10 +211,10 @@ export default function CollectionsScreen() {
         </>
       )}
 
-      {/* ── Tab Content: Enquiries (Projects) ── */}
-      {tab === 'projects' && (
+      {/* ── Tab Content: Legacy (seedless Inquiries only) ── */}
+      {activeTab === 'projects' && (
         <>
-          {projects.length === 0 ? (
+          {legacyProjects.length === 0 ? (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyTitle}>No Enquiries yet</Text>
               <Text style={styles.emptyText}>
@@ -216,7 +226,7 @@ export default function CollectionsScreen() {
             </View>
           ) : (
             <FlatList
-              data={projects}
+              data={legacyProjects}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.listContent}
               renderItem={({ item }) => (

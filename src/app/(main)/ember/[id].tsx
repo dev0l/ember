@@ -26,58 +26,36 @@ import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import type { EmberSeed } from '@/core';
 import type { Spark } from '@/core/spark-types';
 import type { EmberProject } from '@/core/ember-project-types';
-import { emberSeedToProject } from '@/core';
 import { loadEmber, loadEmberMarkdown, deleteEmber } from '@/services/ember-storage';
 import { listSparks, saveSpark } from '@/services/spark-storage';
 import {
   loadLatestDesignPack,
   loadProjectByEmberId,
-  saveProject,
   saveDesignPack,
 } from '@/services/ember-project-storage';
 import {
-  getFoundationalQuestions,
-  getAvailableExploratoryQuestions,
-} from '@/knowledge/questions';
-import { generateDesignPack } from '@/engine/design-pack-generator';
+  loadInquiryEvidence,
+  ensureInquiryForEmber,
+  recordDecision,
+} from '@/services/inquiry-storage';
+import {
+  evaluateInquiry,
+  chooseDesignPack,
+  generateDesignPack,
+  designPackStaleness,
+  DESIGN_PACK_GENERATOR,
+  type InquiryState,
+} from '@/inquiry';
 
 export default function EmberViewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [seed, setSeed] = useState<EmberSeed | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [participatingSparks, setParticipatingSparks] = useState<Spark[]>([]);
-  const [project, setProject] = useState<EmberProject | null>(null);
-  const [designPack, setDesignPack] = useState<{ version: number } | null>(null);
+  const [inquiryInfo, setInquiryInfo] = useState<{ id: string; emberId: string; name: string } | null>(null);
+  const [inquiryState, setInquiryState] = useState<InquiryState | null>(null);
+  const [designPack, setDesignPack] = useState<{ version: number; staleness: 'current' | 'stale' | 'unknown' } | null>(null);
   const [loading, setLoading] = useState(true);
-
-  // Derived progression state
-  const foundationalCount = useMemo(() => getFoundationalQuestions().length, []);
-
-  const progression = useMemo(() => {
-    if (!project) return { developed: false, exploring: false, explored: false, generated: false, canExplore: false, canGenerate: false };
-    const developed = project.answers.length >= foundationalCount;
-    const hasExploratoryAnswers = project.answers.length > foundationalCount;
-    const generated = project.designPackVersion > 0;
-    const availableExploratory = developed
-      ? getAvailableExploratoryQuestions(
-          project.askedQuestionIds,
-          project.conditions.map(c => c.id),
-        )
-      : [];
-    const moreToExplore = availableExploratory.length > 0;
-    // exploring: has begun exploratory but more questions remain
-    const exploring = hasExploratoryAnswers && moreToExplore;
-    // explored: has answered at least one exploratory AND no more remain
-    const explored = hasExploratoryAnswers && !moreToExplore;
-    // canExplore: developed, has available exploratory questions, hasn't finished
-    const canExplore = developed && !generated && moreToExplore;
-    // canGenerate: developed is sufficient. Explore is voluntary enrichment,
-    // not a gate. Generation becomes available once Develop establishes
-    // the foundational conditions. Do not promote "all exploratory questions
-    // exhausted" into domain truth for when generation is warranted.
-    const canGenerate = developed && !generated;
-    return { developed, exploring, explored, generated, canExplore, canGenerate };
-  }, [project, foundationalCount]);
 
   // Reload every time this screen comes into focus (e.g. after editing or returning from session)
   useFocusEffect(
@@ -94,14 +72,19 @@ export default function EmberViewScreen() {
         .filter(s => s.emberId === id);
       setParticipatingSparks(associated);
 
-      // Discover associated EmberProject via indexed lookup
-      const associatedProject = loadProjectByEmberId(id) ?? null;
-      setProject(associatedProject);
+      // Ensure an Inquiry exists for this Ember and evaluate its engine state
+      const inq = ensureInquiryForEmber(id, loadedSeed?.name);
+      setInquiryInfo(inq);
 
-      // Load latest Design Pack if generated
-      if (associatedProject && associatedProject.designPackVersion > 0) {
-        const pack = loadLatestDesignPack(associatedProject.id);
-        setDesignPack(pack ? { version: pack.version } : null);
+      const evidence = loadInquiryEvidence(inq.id);
+      const state = evaluateInquiry(evidence);
+      setInquiryState(state);
+
+      // Load latest Design Pack if one exists
+      const pack = loadLatestDesignPack(inq.id);
+      if (pack) {
+        const staleness = designPackStaleness(pack.record?.reviewFingerprint, state);
+        setDesignPack({ version: pack.version, staleness });
       } else {
         setDesignPack(null);
       }
@@ -124,55 +107,81 @@ export default function EmberViewScreen() {
     }
   }, [id]);
 
-  // ── Develop further: cross from initiation into enquiry ──
-  const handleDevelop = useCallback(() => {
-    if (!seed) return;
-
-    // The crossing: EmberSeed → EmberProject
-    const newProject = emberSeedToProject(seed);
-    saveProject(newProject);
-
-    // Navigate to the Ember Session with the new project
-    router.push({
-      pathname: '/(main)/ember-session/[id]',
-      params: { id: newProject.id },
-    } as any);
-  }, [seed]);
-
-  // ── Explore further: enter exploratory phase of existing inquiry ──
+  // ── Explore: deliberate entry into Explore movement ──
   const handleExplore = useCallback(() => {
-    if (!project) return;
+    if (!inquiryInfo) return;
     router.push({
       pathname: '/(main)/ember-session/[id]',
-      params: { id: project.id, startPhase: 'exploratory' },
+      params: { id: inquiryInfo.id, movement: 'explore' },
     } as any);
-  }, [project]);
+  }, [inquiryInfo]);
 
-  // ── Generate Design Pack from the Ember surface ──
+  // ── Choose Design Pack: deliberate user choice once available ──
+  const handleChooseDesignPack = useCallback(() => {
+    if (!inquiryInfo || !inquiryState) return;
+    const decision = chooseDesignPack(inquiryState, new Date().toISOString());
+    if (decision) {
+      recordDecision(inquiryInfo.id, decision);
+      // Immediately evaluate and refresh state
+      const evidence = loadInquiryEvidence(inquiryInfo.id);
+      const updated = evaluateInquiry(evidence);
+      setInquiryState(updated);
+      // Open session directly into Develop movement
+      router.push({
+        pathname: '/(main)/ember-session/[id]',
+        params: { id: inquiryInfo.id, movement: 'develop' },
+      } as any);
+    }
+  }, [inquiryInfo, inquiryState]);
+
+  // ── Develop: deliberate entry into Develop movement ──
+  const handleDevelop = useCallback(() => {
+    if (!inquiryInfo) return;
+    router.push({
+      pathname: '/(main)/ember-session/[id]',
+      params: { id: inquiryInfo.id, movement: 'develop' },
+    } as any);
+  }, [inquiryInfo]);
+
+  // ── Generate Design Pack: available only when warranted ──
   const handleGenerateFromEmber = useCallback(() => {
-    if (!project) return;
+    if (!inquiryInfo || !inquiryState || !seed) return;
+    const evidence = loadInquiryEvidence(inquiryInfo.id);
+    const result = generateDesignPack(
+      evidence,
+      {
+        title: seed.name || 'Untitled Ember',
+        originalMaterial: seed.spark || undefined,
+      },
+      new Date().toISOString(),
+    );
+
+    if (!result.ok) {
+      Alert.alert('Generation refused', result.reason);
+      return;
+    }
+
     try {
-      const packMarkdown = generateDesignPack(project);
-      const version = project.designPackVersion + 1;
-      saveDesignPack(project.id, version, packMarkdown);
-      const updated: EmberProject = {
-        ...project,
-        status: 'generated',
-        designPackVersion: version,
-        updatedAt: new Date().toISOString(),
-      };
-      saveProject(updated);
-      setProject(updated);
-      setDesignPack({ version });
+      const nextVersion = (designPack?.version ?? 0) + 1;
+      saveDesignPack(inquiryInfo.id, nextVersion, result.markdown, {
+        provenance: 'engine',
+        generator: DESIGN_PACK_GENERATOR,
+        libraryVersion: result.state.libraryVersion,
+        configurationId: result.state.designPack.adoptedConfigurationId!,
+        evidenceFingerprint: result.state.fingerprints.evidence,
+        reviewFingerprint: result.state.fingerprints.review,
+      });
+
+      setDesignPack({ version: nextVersion, staleness: 'current' });
       router.push({
         pathname: '/(main)/design-pack/[id]',
-        params: { id: project.id },
+        params: { id: inquiryInfo.id },
       } as any);
     } catch (error) {
-      Alert.alert('Generation failed', 'Something went wrong generating the Design Pack.');
+      Alert.alert('Generation failed', 'Something went wrong saving the Design Pack.');
       if (__DEV__) console.error('🔥 [Ember] Design Pack generation error:', error);
     }
-  }, [project]);
+  }, [inquiryInfo, inquiryState, seed, designPack]);
 
   // ── Remove Ember ──
   // Guardian amendment: only undeveloped Embers can be removed cleanly.
@@ -180,8 +189,13 @@ export default function EmberViewScreen() {
   const handleRemove = useCallback(() => {
     if (!seed || !id) return;
 
-    if (project) {
-      // This Ember has an associated Inquiry — removal is relationally non-trivial
+    const hasLineage = Boolean(
+      (inquiryState && inquiryState.questions.some(q => q.answer !== undefined)) ||
+      designPack !== null,
+    );
+
+    if (hasLineage) {
+      // This Ember has an associated Inquiry with answers or packs — removal is relationally non-trivial
       Alert.alert(
         'Removal boundary',
         'This Ember has been developed into an Inquiry. Removing an Ember with existing Inquiry lineage requires answering questions about what happens to conditions, propositions, and any generated artifacts.\n\nThis boundary has become relationally non-trivial. Removal for developed Embers is deferred to the database cycle.',
@@ -211,7 +225,7 @@ export default function EmberViewScreen() {
         },
       ],
     );
-  }, [seed, id, project, participatingSparks]);
+  }, [seed, id, inquiryState, designPack, participatingSparks]);
 
   if (loading) {
     return (
@@ -294,92 +308,97 @@ export default function EmberViewScreen() {
           </View>
         )}
 
-        {/* ── Inquiry Progression ── */}
+        {/* ── Inquiry Progression (Reconciled Movement Order: Explore → Develop → Generate) ── */}
         <View style={styles.developSection}>
           <View style={styles.developDivider} />
 
-          {/* Develop */}
-          {!project ? (
-            <Pressable onPress={handleDevelop} style={styles.developButton}>
-              <Text style={styles.developButtonText}>
-                Develop
-              </Text>
-              <Text style={styles.developButtonHint}>
-                Carry this into structured enquiry
-              </Text>
-            </Pressable>
-          ) : !progression.developed ? (
-            <Pressable
-              onPress={() => router.push({
-                pathname: '/(main)/ember-session/[id]',
-                params: { id: project.id },
-              } as any)}
-              style={styles.developButton}
-            >
-              <Text style={styles.developButtonText}>
-                Developing
-              </Text>
-              <Text style={styles.developButtonHint}>
-                {project.answers.length} of {foundationalCount} answered
-              </Text>
-            </Pressable>
-          ) : (
-            <View style={styles.completedMovement}>
-              <Text style={styles.completedText}>✓ Developed</Text>
-              <Text style={styles.completedHint}>
-                {project.conditions.length} condition{project.conditions.length !== 1 ? 's' : ''} established
-              </Text>
-            </View>
+          {/* 1. Explore Movement */}
+          {inquiryState && (
+            inquiryState.explore.missingRequired.length > 0 ? (
+              <Pressable onPress={handleExplore} style={styles.developButton}>
+                <Text style={styles.developButtonText}>
+                  Explore
+                </Text>
+                <Text style={styles.developButtonHint}>
+                  Establish purpose and audience
+                </Text>
+              </Pressable>
+            ) : inquiryState.explore.openOptional.length > 0 ? (
+              <Pressable onPress={handleExplore} style={styles.developButton}>
+                <Text style={styles.developButtonText}>
+                  Exploring
+                </Text>
+                <Text style={styles.developButtonHint}>
+                  Purpose established · optional questions available
+                </Text>
+              </Pressable>
+            ) : (
+              <View style={styles.completedMovement}>
+                <Text style={styles.completedText}>✓ Explored</Text>
+                <Text style={styles.completedHint}>
+                  Purpose and audience established
+                </Text>
+              </View>
+            )
           )}
 
-          {/* Explore */}
-          {progression.canExplore && (
-            <Pressable onPress={handleExplore} style={styles.developButton}>
-              <Text style={styles.developButtonText}>
-                Explore
+          {/* 2. Design Pack Consequence (Available & Actionable) */}
+          {inquiryState?.designPack.available && !inquiryState.designPack.chosen && (
+            <Pressable onPress={handleChooseDesignPack} style={[styles.developButton, styles.generateButton]}>
+              <Text style={styles.generateButtonText}>
+                Design Pack Available
               </Text>
               <Text style={styles.developButtonHint}>
-                Voluntary questions from what has been established
+                Tap to choose Design Pack and begin Develop
               </Text>
             </Pressable>
-          )}
-          {progression.exploring && (
-            <Pressable onPress={handleExplore} style={styles.developButton}>
-              <Text style={styles.developButtonText}>
-                Exploring
-              </Text>
-              <Text style={styles.developButtonHint}>
-                {project!.answers.length - foundationalCount} answered · more available
-              </Text>
-            </Pressable>
-          )}
-          {progression.explored && (
-            <View style={styles.completedMovement}>
-              <Text style={styles.completedText}>✓ Explored</Text>
-              <Text style={styles.completedHint}>
-                {project!.answers.length - foundationalCount} additional answer{project!.answers.length - foundationalCount !== 1 ? 's' : ''}
-              </Text>
-            </View>
           )}
 
-          {/* Generate Design Pack */}
-          {progression.canGenerate && !progression.generated && (
+          {/* 3. Develop Movement (only once Design Pack chosen) */}
+          {inquiryState?.designPack.chosen && (
+            inquiryState.designPack.developing ? (
+              <Pressable onPress={handleDevelop} style={styles.developButton}>
+                <Text style={styles.developButtonText}>
+                  Developing
+                </Text>
+                <Text style={styles.developButtonHint}>
+                  {inquiryState.designPack.outstanding.length > 0
+                    ? `${inquiryState.designPack.outstanding.length} requirement${inquiryState.designPack.outstanding.length !== 1 ? 's' : ''} outstanding`
+                    : inquiryState.designPack.blockers.length > 0
+                    ? `${inquiryState.designPack.blockers.length} blocker${inquiryState.designPack.blockers.length !== 1 ? 's' : ''} require attention`
+                    : !inquiryState.designPack.adoptedConfigurationId
+                    ? 'Configuration adoption required'
+                    : 'Review confirmation required'}
+                </Text>
+              </Pressable>
+            ) : (
+              <View style={styles.completedMovement}>
+                <Text style={styles.completedText}>✓ Developed</Text>
+                <Text style={styles.completedHint}>
+                  Warranted for {inquiryState.designPack.adoptedConfigurationId}
+                </Text>
+              </View>
+            )
+          )}
+
+          {/* 4. Generate Design Pack (Warranted only) */}
+          {inquiryState?.designPack.generationAvailable && (
             <Pressable onPress={handleGenerateFromEmber} style={[styles.developButton, styles.generateButton]}>
               <Text style={styles.generateButtonText}>
                 Generate Design Pack
               </Text>
               <Text style={styles.developButtonHint}>
-                From what has been established
+                Warranted from established requirements
               </Text>
             </Pressable>
           )}
 
-          {/* View Design Pack (consequence visible from Ember) */}
-          {progression.generated && designPack && (
+          {/* 5. View Design Pack */}
+          {designPack && (
             <Pressable
               onPress={() => router.push({
                 pathname: '/(main)/design-pack/[id]',
-                params: { id: project!.id },
+                params: { id: inquiryInfo!.id },
               } as any)}
               style={styles.developButton}
             >
@@ -387,7 +406,9 @@ export default function EmberViewScreen() {
                 ✓ Design Pack v{designPack.version}
               </Text>
               <Text style={styles.developButtonHint}>
-                Tap to view
+                {designPack.staleness === 'stale'
+                  ? 'Evidence changed since generation · tap to view'
+                  : 'Tap to view'}
               </Text>
             </Pressable>
           )}

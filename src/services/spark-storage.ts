@@ -21,9 +21,17 @@ import { getDatabase } from './database';
 export function saveSpark(spark: Spark): void {
   const db = getDatabase();
 
+  // In-place upsert. INSERT OR REPLACE would DELETE the existing row,
+  // cascading through spark_participations.spark_id and silently
+  // removing participations. Release is handled explicitly below.
   db.runSync(
-    `INSERT OR REPLACE INTO sparks (id, title, content, input_type, audio_uri, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sparks (id, title, content, input_type, audio_uri, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       title = excluded.title,
+       content = excluded.content,
+       input_type = excluded.input_type,
+       audio_uri = excluded.audio_uri`,
     spark.id,
     spark.title,
     spark.content,

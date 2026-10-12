@@ -31,4 +31,23 @@ export {
   saveDesignPack,
   loadDesignPack,
   loadLatestDesignPack,
+  loadDesignPackRecords,
+  loadDesignPackRecord,
+  LEGACY_GENERATOR,
 } from './ember-project-storage';
+export type {
+  DesignPackProvenance,
+  DesignPackOrigin,
+  DesignPackRecord,
+} from './ember-project-storage';
+
+// Inquiry decisions and answers (schema v3, engine authority)
+export {
+  recordDecision,
+  loadDecisions,
+  saveAnswer,
+  loadAnswers,
+  loadInquiryEvidence,
+  ensureInquiryForEmber,
+  loadInquiryRow,
+} from './inquiry-storage';

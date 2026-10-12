@@ -4,7 +4,7 @@
 // "The Markdown is for Ember to communicate."
 //
 // Displays the generated Design Pack Markdown with
-// warm styling. Includes regenerate capability.
+// warm styling and engine provenance metadata.
 // ─────────────────────────────────────────────
 
 import { useState, useCallback } from 'react';
@@ -14,97 +14,60 @@ import {
   ScrollView,
   Pressable,
   StyleSheet,
-  Alert,
   Share,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
-import type { EmberProject } from '@/core/ember-project-types';
-import { generateDesignPack } from '@/engine/design-pack-generator';
 import {
-  loadProject,
-  saveProject,
+  loadInquiryRow,
+  loadInquiryEvidence,
   loadLatestDesignPack,
-  saveDesignPack,
-} from '@/services/ember-project-storage';
+  type DesignPackRecord,
+} from '@/services';
+import {
+  evaluateInquiry,
+  designPackStaleness,
+} from '@/inquiry';
 
 export default function DesignPackViewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [project, setProject] = useState<EmberProject | null>(null);
+  const [inquiry, setInquiry] = useState<{ id: string; emberId: string | null; name: string } | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
+  const [record, setRecord] = useState<DesignPackRecord | null>(null);
+  const [staleness, setStaleness] = useState<'current' | 'stale' | 'unknown'>('unknown');
 
   useFocusEffect(
     useCallback(() => {
       if (!id) return;
-      const loaded = loadProject(id);
-      setProject(loaded);
+      const inq = loadInquiryRow(id);
+      setInquiry(inq);
+
+      const evidence = loadInquiryEvidence(id);
+      const state = evaluateInquiry(evidence);
 
       const pack = loadLatestDesignPack(id);
       if (pack) {
         setMarkdown(pack.markdown);
         setVersion(pack.version);
+        setRecord(pack.record);
+        setStaleness(designPackStaleness(pack.record?.reviewFingerprint, state));
+      } else {
+        setMarkdown(null);
+        setVersion(0);
+        setRecord(null);
+        setStaleness('unknown');
       }
     }, [id]),
   );
-
-  // Guard: regeneration is only meaningful if state has changed since last generation.
-  // The generator is deterministic — same state produces same output.
-  // Currently: no mechanism changes answers after generation in the normal flow.
-  // Future: re-exploration would add answers, making regeneration meaningful.
-  const canRegenerate = project
-    ? project.answers.length > 0 && project.designPackVersion > 0 &&
-      // Simple heuristic: answer count exceeds what was likely present at generation.
-      // Since we don't store generation context, compare against the current pack.
-      // For now, generate a fresh pack and compare — if identical, suppress.
-      false // Regeneration not yet meaningful in current flow
-    : false;
-
-  const handleRegenerate = useCallback(() => {
-    if (!project || !id) return;
-
-    try {
-      const md = generateDesignPack(project);
-
-      // Guard: if the output is identical to the current pack, don't create a new version
-      if (md === markdown) {
-        Alert.alert(
-          'No changes detected',
-          'The Design Pack would be identical to the current version. New answers or exploration would make regeneration meaningful.',
-        );
-        return;
-      }
-
-      const newVersion = project.designPackVersion + 1;
-
-      saveDesignPack(id, newVersion, md);
-
-      const updated: EmberProject = {
-        ...project,
-        status: 'generated',
-        designPackVersion: newVersion,
-        updatedAt: new Date().toISOString(),
-      };
-      saveProject(updated);
-
-      setProject(updated);
-      setMarkdown(md);
-      setVersion(newVersion);
-    } catch (error) {
-      Alert.alert('Error', 'Failed to regenerate Design Pack.');
-      if (__DEV__) {
-        console.error('🔥 [Ember] Regenerate error:', error);
-      }
-    }
-  }, [project, id, markdown]);
 
   const handleExport = useCallback(async () => {
     if (!markdown) return;
     try {
       await Share.share({
-        title: project?.name ? `Design Pack - ${project.name}` : 'Ember Design Pack',
+        title: inquiry?.name ? `Design Pack - ${inquiry.name}` : 'Ember Design Pack',
         message: markdown,
       });
     } catch (error) {
@@ -112,33 +75,34 @@ export default function DesignPackViewScreen() {
         console.error('🔥 [Ember] Share error:', error);
       }
     }
-  }, [markdown, project?.name]);
+  }, [markdown, inquiry?.name]);
 
   const handleEmber = useCallback(() => {
     if (!id) return;
-    if (project?.seedId) {
-      // Ember View is already on the stack underneath — pop back to it
+    if (inquiry?.emberId) {
       if (router.canGoBack()) {
         router.back();
       } else {
-        router.replace(`/(main)/ember/${project.seedId}` as any);
+        router.replace(`/(main)/ember/${inquiry.emberId}` as any);
       }
     } else {
-      // Legacy: direct access to session
-      router.push({
-        pathname: '/(main)/ember-session/[id]',
-        params: { id },
-      } as any);
+      if (router.canGoBack()) {
+        router.back();
+      } else {
+        router.replace('/');
+      }
     }
-  }, [id, project?.seedId]);
+  }, [id, inquiry?.emberId]);
 
   const handleBack = useCallback(() => {
     if (router.canGoBack()) {
       router.back();
+    } else if (inquiry?.emberId) {
+      router.replace(`/(main)/ember/${inquiry.emberId}` as any);
     } else {
       router.replace('/');
     }
-  }, []);
+  }, [inquiry?.emberId]);
 
   if (!markdown) {
     return (
@@ -165,7 +129,7 @@ export default function DesignPackViewScreen() {
         <View style={styles.headerCenter}>
           <Text style={styles.headerLabel}>DESIGN PACK</Text>
           <Text style={styles.headerName} numberOfLines={1}>
-            {project?.name ?? 'Ember'}
+            {inquiry?.name ?? 'Ember'}
           </Text>
         </View>
         <View style={styles.headerActions}>
@@ -174,9 +138,6 @@ export default function DesignPackViewScreen() {
           </Pressable>
           <Pressable onPress={handleEmber} hitSlop={12} style={styles.headerActionBtn}>
             <Text style={styles.enquiryText}>Ember</Text>
-          </Pressable>
-          <Pressable onPress={handleRegenerate} hitSlop={12} style={styles.headerActionBtn}>
-            <Text style={styles.regenerateText}>Regen</Text>
           </Pressable>
         </View>
       </View>
@@ -189,6 +150,15 @@ export default function DesignPackViewScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {staleness === 'stale' && (
+          <View style={styles.staleBanner}>
+            <Text style={styles.staleBannerTitle}>STALE DESIGN PACK</Text>
+            <Text style={styles.staleBannerText}>
+              Inquiry evidence has changed since this pack was generated. Return to Ember to review or generate a new pack when warranted.
+            </Text>
+          </View>
+        )}
+
         {renderMarkdownBlocks(markdown)}
 
         {/* ── Footer ── */}
@@ -197,9 +167,30 @@ export default function DesignPackViewScreen() {
             <Text style={styles.exportButtonLargeText}>Share Design Pack</Text>
             <Text style={styles.exportButtonLargeHint}>Export persisted Markdown</Text>
           </Pressable>
-          <Text style={styles.metaText}>
-            Version {version} · Generated by Ember · Persisted Markdown
-          </Text>
+
+          <View style={styles.provenanceBox}>
+            <Text style={styles.provenanceTitle}>
+              Version {version} · {record?.provenance === 'engine' ? 'Engine Generated' : record?.provenance === 'legacy' ? 'Legacy Proposition' : 'Persisted Markdown'}
+            </Text>
+            {record?.configurationId && (
+              <Text style={styles.provenanceDetail}>
+                Configuration: {record.configurationId}
+              </Text>
+            )}
+            {record?.generator && (
+              <Text style={styles.provenanceDetail}>
+                Generator: {record.generator}
+              </Text>
+            )}
+            {record?.recordedAt && (
+              <Text style={styles.provenanceDetail}>
+                Recorded: {new Date(record.recordedAt).toLocaleString()}
+              </Text>
+            )}
+            <Text style={[styles.provenanceDetail, staleness === 'stale' ? styles.staleDetail : styles.currentDetail]}>
+              Status: {staleness === 'stale' ? 'Stale (evidence changed)' : staleness === 'current' ? 'Current with latest evidence' : 'Unknown staleness'}
+            </Text>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -341,7 +332,7 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.xs,
+    gap: SPACING.sm,
   },
   headerActionBtn: {
     paddingHorizontal: SPACING.xs,
@@ -357,11 +348,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.textSecondary,
   },
-  regenerateText: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-  },
   divider: {
     height: 1,
     backgroundColor: 'rgba(255, 107, 43, 0.12)',
@@ -372,6 +358,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.lg,
     paddingBottom: SPACING.xl * 3,
+  },
+
+  staleBanner: {
+    backgroundColor: 'rgba(255, 179, 71, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 179, 71, 0.3)',
+    borderRadius: 12,
+    padding: SPACING.md,
+    marginBottom: SPACING.lg,
+    gap: 4,
+  },
+  staleBannerTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FFB347',
+    letterSpacing: 1,
+  },
+  staleBannerText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
   },
 
   metaFooter: {
@@ -404,10 +411,30 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     letterSpacing: 0.5,
   },
-  metaText: {
-    fontSize: 9,
+
+  provenanceBox: {
+    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 10,
+    padding: SPACING.md,
+    gap: 4,
+  },
+  provenanceTitle: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    marginBottom: 2,
+  },
+  provenanceDetail: {
+    fontSize: 10,
     color: COLORS.textMuted,
-    letterSpacing: 0.5,
+    lineHeight: 16,
+  },
+  currentDetail: {
+    color: '#4ADE80',
+  },
+  staleDetail: {
+    color: '#FFB347',
   },
 });
 

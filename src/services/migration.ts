@@ -13,19 +13,42 @@ import type { Spark } from '@/core/spark-types';
 import type { EmberProject } from '@/core/ember-project-types';
 import { parseEmberMarkdown } from './ember-markdown';
 import { getDatabase } from './database';
+import { backfillDesignPackRecords } from './ember-project-storage';
 
 const SPARKS_DIR = new Directory(Paths.document, 'sparks');
 const EMBERS_DIR = new Directory(Paths.document, 'embers');
 const PROJECTS_DIR = new Directory(Paths.document, 'ember-projects');
 
+const V1_FILE_TO_SQLITE = 'v1_file_to_sqlite';
+const V3_DESIGN_PACK_BACKFILL = 'v3_design_pack_backfill';
+
+function isMigrationDone(key: string): boolean {
+  const db = getDatabase();
+  return !!db.getFirstSync<{ key: string }>(
+    `SELECT key FROM _migration WHERE key = ?`,
+    key,
+  );
+}
+
+function markMigrationDone(key: string): void {
+  getDatabase().runSync(
+    `INSERT OR IGNORE INTO _migration (key, completed_at) VALUES (?, ?)`,
+    key,
+    new Date().toISOString(),
+  );
+}
+
 /**
- * Migrate existing file-based data to SQLite.
- * Idempotent: checks a flag in the database to skip if already done.
+ * Run pending data migrations, each independently keyed in `_migration`.
+ * Idempotent: completed steps are skipped.
+ *
+ * Order matters: the v3 backfill needs Inquiries to exist, so it runs after
+ * the v1 file → SQLite import (on a fresh install with legacy files, both
+ * run in this same call).
  */
 export function migrateIfNeeded(): void {
   const db = getDatabase();
 
-  // Check if migration has already completed
   db.execSync(`
     CREATE TABLE IF NOT EXISTS _migration (
       key TEXT PRIMARY KEY NOT NULL,
@@ -33,12 +56,26 @@ export function migrateIfNeeded(): void {
     );
   `);
 
-  const done = db.getFirstSync<{ key: string }>(
-    `SELECT key FROM _migration WHERE key = ?`,
-    'v1_file_to_sqlite',
-  );
+  if (!isMigrationDone(V1_FILE_TO_SQLITE)) {
+    migrateFilesToSqlite();
+  }
 
-  if (done) return;
+  if (!isMigrationDone(V3_DESIGN_PACK_BACKFILL)) {
+    const inserted = backfillDesignPackRecords();
+    markMigrationDone(V3_DESIGN_PACK_BACKFILL);
+    if (__DEV__) {
+      console.log(
+        `🔥 [Migration] Design Pack backfill: ${inserted} existing file(s) recorded as provenance 'unknown'`,
+      );
+    }
+  }
+}
+
+/**
+ * v1: Migrate existing file-based data to SQLite.
+ */
+function migrateFilesToSqlite(): void {
+  const db = getDatabase();
 
   if (__DEV__) {
     console.log('🔥 [Migration] Starting file → SQLite migration...');
@@ -48,7 +85,51 @@ export function migrateIfNeeded(): void {
   let emberCount = 0;
   let projectCount = 0;
 
-  // ── Migrate Sparks ──
+  // ── Import order matters ──
+  // getDatabase() has already applied schema v1 and v2, so
+  // spark_participations.ember_id and inquiries.ember_id reference embers(id)
+  // with FK enforcement ON. Embers must therefore be imported BEFORE Sparks
+  // (whose participations reference Embers) and BEFORE Inquiries.
+  // Previously Sparks ran first, so participation inserts for not-yet-imported
+  // Embers failed and were silently swallowed by the per-file catch.
+
+  // ── Migrate Embers ──
+  if (EMBERS_DIR.exists) {
+    try {
+      const entries = EMBERS_DIR.list();
+      for (const entry of entries) {
+        if (entry instanceof File && entry.name.endsWith('.md')) {
+          try {
+            const markdown = entry.textSync();
+            const seed = parseEmberMarkdown(markdown);
+
+            db.runSync(
+              `INSERT OR IGNORE INTO embers
+               (id, nature, name, spark_text, carried_sentence, questions, sources, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              seed.id,
+              seed.nature,
+              seed.name ?? null,
+              seed.spark ?? null,
+              seed.carriedSentence ?? null,
+              JSON.stringify(seed.questions),
+              JSON.stringify(seed.sources),
+              seed.createdAt,
+              seed.updatedAt,
+            );
+
+            emberCount++;
+          } catch {
+            // Skip invalid files
+          }
+        }
+      }
+    } catch {
+      // Directory read error
+    }
+  }
+
+  // ── Migrate Sparks (after Embers — participations reference embers) ──
   if (SPARKS_DIR.exists) {
     try {
       const entries = SPARKS_DIR.list();
@@ -79,42 +160,6 @@ export function migrateIfNeeded(): void {
             }
 
             sparkCount++;
-          } catch {
-            // Skip invalid files
-          }
-        }
-      }
-    } catch {
-      // Directory read error
-    }
-  }
-
-  // ── Migrate Embers ──
-  if (EMBERS_DIR.exists) {
-    try {
-      const entries = EMBERS_DIR.list();
-      for (const entry of entries) {
-        if (entry instanceof File && entry.name.endsWith('.md')) {
-          try {
-            const markdown = entry.textSync();
-            const seed = parseEmberMarkdown(markdown);
-
-            db.runSync(
-              `INSERT OR IGNORE INTO embers
-               (id, nature, name, spark_text, carried_sentence, questions, sources, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              seed.id,
-              seed.nature,
-              seed.name ?? null,
-              seed.spark ?? null,
-              seed.carriedSentence ?? null,
-              JSON.stringify(seed.questions),
-              JSON.stringify(seed.sources),
-              seed.createdAt,
-              seed.updatedAt,
-            );
-
-            emberCount++;
           } catch {
             // Skip invalid files
           }
@@ -177,11 +222,7 @@ export function migrateIfNeeded(): void {
   }
 
   // Mark migration complete
-  db.runSync(
-    `INSERT INTO _migration (key, completed_at) VALUES (?, ?)`,
-    'v1_file_to_sqlite',
-    new Date().toISOString(),
-  );
+  markMigrationDone(V1_FILE_TO_SQLITE);
 
   if (__DEV__) {
     console.log(
