@@ -1,17 +1,14 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
-import { useEmberStore } from '@/store';
-import type { EmberNode } from '@/core';
-import { EmberHub } from '@/components/ember-hub/EmberHub';
 import { listEmbers } from '@/services/ember-storage';
 import { listProjects } from '@/services/ember-project-storage';
 
 // ─────────────────────────────────────────────
-// Home Hub Screen
+// Home Screen
 // ─────────────────────────────────────────────
 
 interface RecentEmberItem {
@@ -44,61 +41,8 @@ function formatRelativeTime(isoString: string): string {
   }
 }
 
-/**
- * Home-level ember nodes.
- * Menu structure is data, not code. (Design Principle #3)
- */
-const HOME_NODES: EmberNode[] = [
-  {
-    id: 'collections',
-    label: 'Collections',
-    subtitle: 'Browse your embers',
-    icon: 'archive',
-    offsetAngle: 0,     // Top
-    offsetRadius: 1,
-    enabled: true,
-    route: '/(main)/collections',
-  },
-  {
-    id: 'recent',
-    label: 'Recent',
-    subtitle: 'Continue your journey',
-    icon: 'clock',
-    offsetAngle: 90,    // Right
-    offsetRadius: 1,
-    enabled: true,
-    route: '/(main)/recent',
-  },
-  {
-    id: 'import',
-    label: 'Import',
-    subtitle: 'Bring in new material',
-    icon: 'download',
-    offsetAngle: 180,   // Bottom
-    offsetRadius: 1,
-    enabled: true,
-    route: '/(main)/import',
-  },
-  {
-    id: 'create',
-    label: 'Spark Ember',
-    subtitle: 'Something is beginning',
-    icon: 'flame',
-    offsetAngle: 270,   // Left
-    offsetRadius: 1,
-    enabled: true,
-    route: '/(main)/create',
-  },
-];
-
 export default function HubScreen() {
-  const { state, selectedNodeId, setNodes } = useEmberStore();
   const [recents, setRecents] = useState<RecentEmberItem[]>([]);
-
-  // Load home nodes on mount
-  useEffect(() => {
-    setNodes(HOME_NODES);
-  }, [setNodes]);
 
   useFocusEffect(
     useCallback(() => {
@@ -174,13 +118,10 @@ export default function HubScreen() {
 
   return (
     <View style={styles.container}>
-      {/* ── Fullscreen Interactive Canvas & Gestures ── */}
-      <EmberHub />
-
-      {/* ── Overlay Content (Header / Footer / Info) ── */}
-      <SafeAreaView style={styles.safeArea} pointerEvents="box-none">
+      {/* ── Main Content ── */}
+      <SafeAreaView style={styles.safeArea}>
         {/* Header */}
-        <View style={styles.header} pointerEvents="none">
+        <View style={styles.header}>
           <Text style={styles.title}>E M B E R</Text>
           <View style={styles.divider}>
             <View style={styles.dividerLine} />
@@ -189,15 +130,6 @@ export default function HubScreen() {
           </View>
           <Text style={styles.tagline}>Carry meaning. Create new.</Text>
         </View>
-
-        {/* State indicator (dev) */}
-        {__DEV__ && (
-          <View style={styles.devIndicator} pointerEvents="none">
-            <Text style={styles.devText}>
-              State: {state}
-            </Text>
-          </View>
-        )}
 
         {/* ── Embers Domain Entry ── */}
         <Pressable
@@ -218,49 +150,42 @@ export default function HubScreen() {
           <Text style={styles.sparkButtonHint}>Capture, browse, relate</Text>
         </Pressable>
 
-        {/* ── Recent Activity Horizontal Scroll (only visible when no node is selected) ── */}
-        {selectedNodeId === null && (
-          <View style={styles.recentSection}>
-            <View style={styles.recentHeaderRow}>
-              <Text style={styles.recentSectionTitle}>Recent Activity</Text>
-              <Pressable onPress={() => router.push('/(main)/recent' as any)}>
-                <Text style={styles.seeAllText}>See all →</Text>
-              </Pressable>
-            </View>
-            {recents.length > 0 ? (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recentScrollContent}
-              >
-                {recents.map((item) => (
-                  <Pressable
-                    key={`${item.kind}-${item.id}`}
-                    style={styles.recentCard}
-                    onPress={() => handleOpenRecent(item)}
-                  >
-                    <View style={styles.recentCardHeader}>
-                      <Text style={styles.recentCardType}>{item.type}</Text>
-                      <Text style={styles.recentCardTime}>{item.time}</Text>
-                    </View>
-                    <Text style={styles.recentCardTitle} numberOfLines={2}>
-                      {item.title}
-                    </Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            ) : (
-              <Text style={styles.emptyRecentText}>
-                No activity yet. Create an Ember or capture Sparks.
-              </Text>
-            )}
+        {/* ── Recent Activity Horizontal Scroll ── */}
+        <View style={styles.recentSection}>
+          <View style={styles.recentHeaderRow}>
+            <Text style={styles.recentSectionTitle}>Recent Activity</Text>
+            <Pressable onPress={() => router.push('/(main)/recent' as any)}>
+              <Text style={styles.seeAllText}>See all →</Text>
+            </Pressable>
           </View>
-        )}
-
-        {/* Footer */}
-        <Text style={styles.footer} pointerEvents="none">
-          Hold core to reveal · Tap node to select · Pinch selected to enter
-        </Text>
+          {recents.length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.recentScrollContent}
+            >
+              {recents.map((item) => (
+                <Pressable
+                  key={`${item.kind}-${item.id}`}
+                  style={styles.recentCard}
+                  onPress={() => handleOpenRecent(item)}
+                >
+                  <View style={styles.recentCardHeader}>
+                    <Text style={styles.recentCardType}>{item.type}</Text>
+                    <Text style={styles.recentCardTime}>{item.time}</Text>
+                  </View>
+                  <Text style={styles.recentCardTitle} numberOfLines={2}>
+                    {item.title}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : (
+            <Text style={styles.emptyRecentText}>
+              No activity yet. Create an Ember or capture Sparks.
+            </Text>
+          )}
+        </View>
       </SafeAreaView>
     </View>
   );
@@ -434,29 +359,4 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     lineHeight: 13,
   },
-
-  // Dev indicator
-  devIndicator: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255, 107, 43, 0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 107, 43, 0.2)',
-    marginTop: SPACING.md,
-  },
-  devText: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.emberOrange,
-    fontFamily: 'monospace',
-  },
-
-  // Footer
-  footer: {
-    fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.textMuted,
-    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
-  },
 });
-
-
