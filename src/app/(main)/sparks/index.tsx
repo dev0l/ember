@@ -33,7 +33,11 @@ import { saveEmber, loadEmber, listEmbers } from '@/services/ember-storage';
 import { loadProject } from '@/services/ember-project-storage';
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 
-export default function SparksScreen() {
+export interface SparksScreenProps {
+  hideHeader?: boolean;
+}
+
+export default function SparksScreen({ hideHeader = false }: SparksScreenProps = {}) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [sparks, setSparks] = useState<Spark[]>([]);
@@ -183,20 +187,24 @@ export default function SparksScreen() {
     }
   }, []);
 
+  const Container = hideHeader ? View : SafeAreaView;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
       >
         {/* ── Header ── */}
-        <View style={styles.header}>
-          <Pressable onPress={handleBack} hitSlop={12}>
-            <Text style={styles.backArrow}>←</Text>
-          </Pressable>
-          <Text style={styles.headerTitle}>Sparks</Text>
-          <View style={styles.headerSpacer} />
-        </View>
+        {!hideHeader && (
+          <View style={styles.header}>
+            <Pressable onPress={handleBack} hitSlop={12}>
+              <Text style={styles.backArrow}>←</Text>
+            </Pressable>
+            <Text style={styles.headerTitle}>Sparks</Text>
+            <View style={styles.headerSpacer} />
+          </View>
+        )}
 
         {/* ── Capture Section ── */}
         <View style={styles.captureSection}>
@@ -407,7 +415,7 @@ export default function SparksScreen() {
           </Pressable>
         </Pressable>
       </Modal>
-    </SafeAreaView>
+    </Container>
   );
 }
 

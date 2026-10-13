@@ -17,7 +17,11 @@ import { EMBER_NATURE_LABELS } from '@/core';
 import { listEmbers } from '@/services/ember-storage';
 import { listProjects } from '@/services/ember-project-storage';
 
-export default function CollectionsScreen() {
+export interface CollectionsScreenProps {
+  hideHeader?: boolean;
+}
+
+export default function CollectionsScreen({ hideHeader = false }: CollectionsScreenProps = {}) {
   const [tab, setTab] = useState<'seeds' | 'projects'>('seeds');
   const [embers, setEmbers] = useState<EmberSeed[]>([]);
   const [projects, setProjects] = useState<EmberProject[]>([]);
@@ -101,18 +105,22 @@ export default function CollectionsScreen() {
     }
   }, []);
 
+  const Container = hideHeader ? View : SafeAreaView;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       {/* ── Header Bar ── */}
-      <View style={styles.headerBar}>
-        <Pressable onPress={handleBack} hitSlop={12}>
-          <Text style={styles.backArrow}>←</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>Embers</Text>
-        <Pressable onPress={handleCreate} hitSlop={12}>
-          <Text style={styles.headerAction}>+ Spark</Text>
-        </Pressable>
-      </View>
+      {!hideHeader && (
+        <View style={styles.headerBar}>
+          <Pressable onPress={handleBack} hitSlop={12}>
+            <Text style={styles.backArrow}>←</Text>
+          </Pressable>
+          <Text style={styles.headerTitle}>Embers</Text>
+          <Pressable onPress={handleCreate} hitSlop={12}>
+            <Text style={styles.headerAction}>+ Spark</Text>
+          </Pressable>
+        </View>
+      )}
       {/* ── Segment / Tab Switcher ──
            Only show Enquiries tab when legacy projects (without seedId) exist.
            Modern projects are accessible through their Embers via Ember View. */}
@@ -283,7 +291,7 @@ export default function CollectionsScreen() {
           )}
         </>
       )}
-    </SafeAreaView>
+    </Container>
   );
 }
 
