@@ -46,18 +46,43 @@ import {
   recordDecision,
 } from '@/services/inquiry-storage';
 
-export default function EmberSessionScreen() {
+export interface EmberSessionScreenProps {
+  inquiryId?: string;
+  initialMovement?: Movement;
+  hideHeader?: boolean;
+  onBack?: () => void;
+}
+
+export default function EmberSessionScreen({
+  inquiryId: propInquiryId,
+  initialMovement: propMovement,
+  hideHeader = false,
+  onBack,
+}: EmberSessionScreenProps = {}) {
   const params = useLocalSearchParams<{
     id: string;
     movement?: string;
   }>();
 
-  const inquiryId = params.id;
-  const initialMovement: Movement = (params.movement as Movement) || 'explore';
+  const inquiryId = propInquiryId || params.id;
+  const initialMovement: Movement = propMovement || (params.movement as Movement) || 'explore';
   const [movement, setMovement] = useState<Movement>(initialMovement);
 
   // Evidence and Engine State
-  const [evidence, setEvidence] = useState(() => loadInquiryEvidence(inquiryId));
+  const [evidence, setEvidence] = useState(() => (inquiryId ? loadInquiryEvidence(inquiryId) : { answers: [], decisions: [] }));
+
+  useEffect(() => {
+    if (inquiryId) {
+      setEvidence(loadInquiryEvidence(inquiryId));
+    }
+  }, [inquiryId]);
+
+  useEffect(() => {
+    if (propMovement) {
+      setMovement(propMovement);
+    }
+  }, [propMovement]);
+
   const inquiryState: InquiryState = useMemo(() => {
     return evaluateInquiry(evidence, DEFAULT_LIBRARY);
   }, [evidence]);
@@ -97,6 +122,10 @@ export default function EmberSessionScreen() {
   // Guarded single return to Ember View
   const hasReturnedRef = useRef(false);
   const returnToEmber = useCallback(() => {
+    if (onBack) {
+      onBack();
+      return;
+    }
     if (hasReturnedRef.current) return;
     hasReturnedRef.current = true;
     if (router.canGoBack()) {
@@ -104,7 +133,7 @@ export default function EmberSessionScreen() {
     } else {
       router.replace('/');
     }
-  }, []);
+  }, [onBack]);
 
   // Submit answer
   const handleAnswerSubmit = useCallback(() => {
@@ -183,24 +212,28 @@ export default function EmberSessionScreen() {
     );
   }, [inquiryState.designPack.candidates]);
 
+  const Container = hideHeader ? View : SafeAreaView;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
       >
         {/* Header bar */}
-        <View style={styles.headerBar}>
-          <Pressable onPress={returnToEmber} hitSlop={12}>
-            <Text style={styles.backArrow}>←</Text>
-          </Pressable>
-          <Text style={styles.headerTitle}>
-            {movement === 'explore' ? 'Explore' : 'Develop'}
-          </Text>
-          <Pressable onPress={returnToEmber} hitSlop={12}>
-            <Text style={styles.doneText}>Done</Text>
-          </Pressable>
-        </View>
+        {!hideHeader && (
+          <View style={styles.headerBar}>
+            <Pressable onPress={returnToEmber} hitSlop={12}>
+              <Text style={styles.backArrow}>←</Text>
+            </Pressable>
+            <Text style={styles.headerTitle}>
+              {movement === 'explore' ? 'Explore' : 'Develop'}
+            </Text>
+            <Pressable onPress={returnToEmber} hitSlop={12}>
+              <Text style={styles.doneText}>Done</Text>
+            </Pressable>
+          </View>
+        )}
 
         <ScrollView
           contentContainerStyle={styles.phaseContent}
@@ -513,7 +546,7 @@ export default function EmberSessionScreen() {
           </Modal>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Container>
   );
 }
 

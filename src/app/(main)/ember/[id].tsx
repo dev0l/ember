@@ -51,12 +51,16 @@ export interface EmberViewScreenProps {
   emberId?: string;
   hideHeader?: boolean;
   onBack?: () => void;
+  onOpenSession?: (inquiryId: string, movement: 'explore' | 'develop') => void;
+  isFocused?: boolean;
 }
 
 export default function EmberViewScreen({
   emberId: propEmberId,
   hideHeader = false,
   onBack,
+  onOpenSession,
+  isFocused = true,
 }: EmberViewScreenProps = {}) {
   const params = useLocalSearchParams<{ id: string }>();
   const id = propEmberId || params.id;
@@ -108,6 +112,13 @@ export default function EmberViewScreen({
     loadData();
   }, [loadData]);
 
+  // Proactively reload when isFocused flips to true within the stage
+  useEffect(() => {
+    if (isFocused) {
+      loadData();
+    }
+  }, [isFocused, loadData]);
+
   const handleBack = useCallback(() => {
     if (onBack) {
       onBack();
@@ -129,11 +140,15 @@ export default function EmberViewScreen({
   // ── Explore: deliberate entry into Explore movement ──
   const handleExplore = useCallback(() => {
     if (!inquiryInfo) return;
+    if (onOpenSession) {
+      onOpenSession(inquiryInfo.id, 'explore');
+      return;
+    }
     router.push({
       pathname: '/(main)/ember-session/[id]',
       params: { id: inquiryInfo.id, movement: 'explore' },
     } as any);
-  }, [inquiryInfo]);
+  }, [inquiryInfo, onOpenSession]);
 
   // ── Choose Design Pack: deliberate user choice once available ──
   const handleChooseDesignPack = useCallback(() => {
@@ -146,21 +161,29 @@ export default function EmberViewScreen({
       const updated = evaluateInquiry(evidence);
       setInquiryState(updated);
       // Open session directly into Develop movement
+      if (onOpenSession) {
+        onOpenSession(inquiryInfo.id, 'develop');
+        return;
+      }
       router.push({
         pathname: '/(main)/ember-session/[id]',
         params: { id: inquiryInfo.id, movement: 'develop' },
       } as any);
     }
-  }, [inquiryInfo, inquiryState]);
+  }, [inquiryInfo, inquiryState, onOpenSession]);
 
   // ── Develop: deliberate entry into Develop movement ──
   const handleDevelop = useCallback(() => {
     if (!inquiryInfo) return;
+    if (onOpenSession) {
+      onOpenSession(inquiryInfo.id, 'develop');
+      return;
+    }
     router.push({
       pathname: '/(main)/ember-session/[id]',
       params: { id: inquiryInfo.id, movement: 'develop' },
     } as any);
-  }, [inquiryInfo]);
+  }, [inquiryInfo, onOpenSession]);
 
   // ── Generate Design Pack: available only when warranted ──
   const handleGenerateFromEmber = useCallback(() => {

@@ -9,13 +9,19 @@ export type TerritoryId = 'embers' | 'sparks';
 
 export type StageMode = 'split' | 'embers' | 'sparks';
 
-export type EmbersFocus = 'collection' | 'ember';
+export type EmbersFocus = 'collection' | 'ember' | 'developing';
 
 export interface EmberPlateData {
   id: string;
   title: string;
   nature?: string;
   sparksCount?: number;
+}
+
+export interface DevelopingPlateData {
+  inquiryId: string;
+  movement: 'explore' | 'develop';
+  title?: string;
 }
 
 export interface TerritoryPlateItem {
@@ -30,6 +36,7 @@ export interface TerritoryStackState {
   activeTerritory: TerritoryId | null; // null represents 'split' resting state
   embersFocus: EmbersFocus;
   selectedEmber: EmberPlateData | null;
+  activeSession: DevelopingPlateData | null;
   lastEmbersFocus: EmbersFocus;
 }
 

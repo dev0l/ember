@@ -16,12 +16,13 @@ import Animated, {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 
-import { StageMode, TerritoryStackState, EmberPlateData } from './types';
+import { StageMode, TerritoryStackState, EmberPlateData, DevelopingPlateData } from './types';
 import { PlateRail, RAIL_HEIGHT } from './PlateRail';
 import { PlateCover } from './PlateCover';
 import CollectionsScreen from '@/app/(main)/collections';
 import SparksScreen from '@/app/(main)/sparks';
 import EmberViewScreen from '@/app/(main)/ember/[id]';
+import EmberSessionScreen from '@/app/(main)/ember-session/[id]';
 import type { EmberSeed } from '@/core';
 
 const ANIM_DURATION = 550;
@@ -38,25 +39,31 @@ export function TerritoryStage() {
     activeTerritory: null,
     embersFocus: 'collection',
     selectedEmber: null,
+    activeSession: null,
     lastEmbersFocus: 'collection',
   });
 
   const openProgress = useSharedValue(0);
-  const emberFocusProgress = useSharedValue(0);
+  const rail1Progress = useSharedValue(0); // 0 = rail 1 down (collection expanded), 1 = rail 1 up (ember/developing expanded)
+  const rail2Progress = useSharedValue(0); // 0 = rail 2 down (collection/ember expanded), 1 = rail 2 up (developing expanded)
 
   const travel = stageHeight > 0 ? stageHeight / 2 - RAIL_HEIGHT : 0;
   const interiorHeight = Math.max(0, stageHeight - 2 * RAIL_HEIGHT);
-  const availableSurfaceHeight = Math.max(0, interiorHeight - RAIL_HEIGHT);
+  const hasSession = stackState.activeSession !== null;
+  const numInteriorRails = hasSession ? 2 : 1;
+  const availableSurfaceHeight = Math.max(0, interiorHeight - numInteriorRails * RAIL_HEIGHT);
 
   // ── Mode Transitions ──
   const openEmbers = useCallback(() => {
     setMode('embers');
     setStackState((prev) => {
       const targetFocus = prev.lastEmbersFocus;
-      emberFocusProgress.value = withTiming(
-        prev.selectedEmber && targetFocus === 'ember' ? 1 : 0,
-        { duration: ANIM_DURATION, easing: ANIM_EASING },
-      );
+      const targetR1 =
+        prev.selectedEmber && (targetFocus === 'ember' || targetFocus === 'developing') ? 1 : 0;
+      const targetR2 =
+        prev.selectedEmber && prev.activeSession && targetFocus === 'developing' ? 1 : 0;
+      rail1Progress.value = withTiming(targetR1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail2Progress.value = withTiming(targetR2, { duration: ANIM_DURATION, easing: ANIM_EASING });
       return {
         ...prev,
         activeTerritory: 'embers',
@@ -64,7 +71,7 @@ export function TerritoryStage() {
       };
     });
     openProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
-  }, [openProgress, emberFocusProgress]);
+  }, [openProgress, rail1Progress, rail2Progress]);
 
   const openSparks = useCallback(() => {
     setMode('sparks');
@@ -97,12 +104,33 @@ export function TerritoryStage() {
       setStackState((prev) => ({
         ...prev,
         selectedEmber: emberData,
+        // If selecting a different ember, reset activeSession
+        activeSession: prev.selectedEmber?.id === id ? prev.activeSession : null,
         embersFocus: 'ember',
         lastEmbersFocus: 'ember',
       }));
-      emberFocusProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
     },
-    [emberFocusProgress],
+    [rail1Progress, rail2Progress],
+  );
+
+  const handleOpenSession = useCallback(
+    (inquiryId: string, movement: 'explore' | 'develop') => {
+      setStackState((prev) => ({
+        ...prev,
+        activeSession: {
+          inquiryId,
+          movement,
+          title: movement === 'explore' ? 'Exploring' : 'Developing',
+        },
+        embersFocus: 'developing',
+        lastEmbersFocus: 'developing',
+      }));
+      rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail2Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    },
+    [rail1Progress, rail2Progress],
   );
 
   const focusCollection = useCallback(() => {
@@ -111,8 +139,9 @@ export function TerritoryStage() {
       embersFocus: 'collection',
       lastEmbersFocus: 'collection',
     }));
-    emberFocusProgress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
-  }, [emberFocusProgress]);
+    rail1Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [rail1Progress, rail2Progress]);
 
   const focusEmber = useCallback(() => {
     if (!stackState.selectedEmber) return;
@@ -121,18 +150,32 @@ export function TerritoryStage() {
       embersFocus: 'ember',
       lastEmbersFocus: 'ember',
     }));
-    emberFocusProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
-  }, [stackState.selectedEmber, emberFocusProgress]);
+    rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [stackState.selectedEmber, rail1Progress, rail2Progress]);
+
+  const focusDeveloping = useCallback(() => {
+    if (!stackState.activeSession) return;
+    setStackState((prev) => ({
+      ...prev,
+      embersFocus: 'developing',
+      lastEmbersFocus: 'developing',
+    }));
+    rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [stackState.activeSession, rail1Progress, rail2Progress]);
 
   const dismissEmber = useCallback(() => {
-    emberFocusProgress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail1Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
     setStackState((prev) => ({
       ...prev,
       selectedEmber: null,
+      activeSession: null,
       embersFocus: 'collection',
       lastEmbersFocus: 'collection',
     }));
-  }, [emberFocusProgress]);
+  }, [rail1Progress, rail2Progress]);
 
   // ── Android Back Handler ──
   useEffect(() => {
@@ -146,6 +189,10 @@ export function TerritoryStage() {
       }
       if (mode === 'embers') {
         if (stackState.selectedEmber) {
+          if (stackState.embersFocus === 'developing') {
+            focusEmber();
+            return true;
+          }
           if (stackState.embersFocus === 'ember') {
             focusCollection();
             return true;
@@ -167,6 +214,8 @@ export function TerritoryStage() {
     mode,
     stackState.selectedEmber,
     stackState.embersFocus,
+    focusDeveloping,
+    focusEmber,
     focusCollection,
     dismissEmber,
     returnToSplit,
@@ -177,7 +226,10 @@ export function TerritoryStage() {
     if (mode === 'split') {
       openEmbers();
     } else if (mode === 'embers') {
-      if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
+      if (
+        stackState.selectedEmber &&
+        (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')
+      ) {
         focusCollection();
       } else {
         returnToSplit();
@@ -185,7 +237,14 @@ export function TerritoryStage() {
     } else if (mode === 'sparks') {
       openEmbers();
     }
-  }, [mode, stackState.selectedEmber, stackState.embersFocus, openEmbers, focusCollection, returnToSplit]);
+  }, [
+    mode,
+    stackState.selectedEmber,
+    stackState.embersFocus,
+    openEmbers,
+    focusCollection,
+    returnToSplit,
+  ]);
 
   const handleBottomPlatePress = useCallback(() => {
     if (mode === 'split') {
@@ -220,18 +279,30 @@ export function TerritoryStage() {
   }));
 
   const emberRailAnimatedStyle = useAnimatedStyle(() => {
-    const topOffset = availableSurfaceHeight * (1 - emberFocusProgress.value);
+    const topOffset = availableSurfaceHeight * (1 - rail1Progress.value);
+    return {
+      transform: [{ translateY: topOffset }],
+    };
+  });
+
+  const developingRailAnimatedStyle = useAnimatedStyle(() => {
+    const topOffset =
+      availableSurfaceHeight + RAIL_HEIGHT - availableSurfaceHeight * rail2Progress.value;
     return {
       transform: [{ translateY: topOffset }],
     };
   });
 
   const collectionsSurfaceAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: 1 - emberFocusProgress.value,
+    opacity: 1 - rail1Progress.value,
   }));
 
   const emberSurfaceAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: emberFocusProgress.value,
+    opacity: rail1Progress.value * (1 - rail2Progress.value),
+  }));
+
+  const developingSurfaceAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: rail2Progress.value,
   }));
 
   const halfHeight = stageHeight > 0 ? stageHeight / 2 : 280;
@@ -241,15 +312,22 @@ export function TerritoryStage() {
   if (mode === 'split') {
     topRole = 'OPEN ↓';
   } else if (mode === 'embers') {
-    if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
+    if (
+      stackState.selectedEmber &&
+      (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')
+    ) {
       topRole = 'COLLECTION ↑';
     } else {
       topRole = 'HERE ◆';
     }
   } else if (mode === 'sparks') {
-    topRole = stackState.selectedEmber
-      ? `RETURN · ${stackState.selectedEmber.title}`
-      : 'OPEN ↑';
+    if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
+      topRole = '• Embers | RETURN · DEVELOPING';
+    } else if (stackState.selectedEmber) {
+      topRole = `RETURN · ${stackState.selectedEmber.title}`;
+    } else {
+      topRole = 'OPEN ↑';
+    }
   }
 
   const bottomRole =
@@ -262,14 +340,26 @@ export function TerritoryStage() {
   // Dynamic status hint
   let footerHint = 'Draw the plates apart. Their edges stay.';
   if (mode === 'sparks') {
-    footerHint = stackState.selectedEmber
-      ? `Sparks open. Embers held with ${stackState.selectedEmber.title}.`
-      : 'Sparks open. Embers held at the upper edge.';
+    if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
+      footerHint = 'Sparks open. Developing session held in Embers lineage.';
+    } else if (stackState.selectedEmber) {
+      footerHint = `Sparks open. Embers held with ${stackState.selectedEmber.title}.`;
+    } else {
+      footerHint = 'Sparks open. Embers held at the upper edge.';
+    }
   } else if (mode === 'embers') {
-    if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
-      footerHint = `${stackState.selectedEmber.title} open. Embers collection held above.`;
-    } else if (stackState.selectedEmber && stackState.embersFocus === 'collection') {
-      footerHint = `Embers collection open. ${stackState.selectedEmber.title} held below.`;
+    if (stackState.selectedEmber) {
+      if (stackState.embersFocus === 'developing') {
+        footerHint = `${stackState.selectedEmber.title} · ${
+          stackState.activeSession?.movement === 'explore' ? 'Explore' : 'Develop'
+        } open. Embers held above.`;
+      } else if (stackState.embersFocus === 'ember') {
+        footerHint = stackState.activeSession
+          ? `${stackState.selectedEmber.title} open. Developing held below.`
+          : `${stackState.selectedEmber.title} open. Embers collection held above.`;
+      } else {
+        footerHint = `Embers collection open. ${stackState.selectedEmber.title} held below.`;
+      }
     } else {
       footerHint = 'Embers open. Sparks held at the lower edge.';
     }
@@ -289,7 +379,9 @@ export function TerritoryStage() {
             <Pressable
               style={styles.headerButton}
               onPress={() => {
-                if (stackState.embersFocus === 'ember') {
+                if (stackState.embersFocus === 'developing') {
+                  focusEmber();
+                } else if (stackState.embersFocus === 'ember') {
                   focusCollection();
                 } else {
                   dismissEmber();
@@ -298,7 +390,11 @@ export function TerritoryStage() {
               hitSlop={8}
             >
               <Text style={styles.headerButtonText}>
-                {stackState.embersFocus === 'ember' ? '← Embers' : 'Deselect'}
+                {stackState.embersFocus === 'developing'
+                  ? `← ${stackState.selectedEmber.title}`
+                  : stackState.embersFocus === 'ember'
+                  ? '← Embers'
+                  : 'Deselect'}
               </Text>
             </Pressable>
           )}
@@ -338,7 +434,7 @@ export function TerritoryStage() {
                 selectedEmberId={null}
               />
             ) : (
-              // Stacked lineage: CollectionsScreen above, Ember plate below
+              // Stacked lineage: CollectionsScreen -> Ember View -> Developing Session
               <View style={styles.stackedTerritory}>
                 {/* 1. Collections Surface (expands when focus is 'collection') */}
                 <Animated.View
@@ -371,20 +467,26 @@ export function TerritoryStage() {
                         ? stackState.selectedEmber.nature.toUpperCase()
                         : undefined
                     }
-                    role={stackState.embersFocus === 'ember' ? 'HERE ◆' : 'OPEN ↓'}
+                    role={
+                      stackState.embersFocus === 'ember'
+                        ? 'HERE ◆'
+                        : stackState.embersFocus === 'developing'
+                        ? 'EMBER ↑'
+                        : 'OPEN ↓'
+                    }
                     isActive={stackState.embersFocus === 'ember'}
                     position="middle"
                     onPress={() => {
-                      if (stackState.embersFocus === 'collection') {
-                        focusEmber();
-                      } else {
+                      if (stackState.embersFocus === 'ember') {
                         focusCollection();
+                      } else {
+                        focusEmber();
                       }
                     }}
                   />
                 </Animated.View>
 
-                {/* 3. Ember View Surface (expands when focus is 'ember', positioned under the Ember rail) */}
+                {/* 3. Ember View Surface (expands between Rail 1 and Rail 2) */}
                 <Animated.View
                   style={[
                     styles.emberSurfaceWrapper,
@@ -397,8 +499,59 @@ export function TerritoryStage() {
                     emberId={stackState.selectedEmber.id}
                     hideHeader={true}
                     onBack={focusCollection}
+                    onOpenSession={handleOpenSession}
+                    isFocused={stackState.embersFocus === 'ember'}
                   />
                 </Animated.View>
+
+                {/* 4. Developing Plate Rail (if session active, translates between y=48 and y=availableSurfaceHeight + 48) */}
+                {hasSession && stackState.activeSession && (
+                  <Animated.View
+                    style={[
+                      styles.developingRailWrapper,
+                      developingRailAnimatedStyle,
+                    ]}
+                    pointerEvents="auto"
+                  >
+                    <PlateRail
+                      title={
+                        stackState.activeSession.movement === 'explore'
+                          ? 'Exploring'
+                          : 'Developing'
+                      }
+                      subtitle={stackState.activeSession.movement.toUpperCase()}
+                      role={stackState.embersFocus === 'developing' ? 'HERE ◆' : 'OPEN ↓'}
+                      isActive={stackState.embersFocus === 'developing'}
+                      position="middle"
+                      onPress={() => {
+                        if (stackState.embersFocus === 'developing') {
+                          focusEmber();
+                        } else {
+                          focusDeveloping();
+                        }
+                      }}
+                    />
+                  </Animated.View>
+                )}
+
+                {/* 5. Developing Session Surface (expands beneath Rail 2) */}
+                {hasSession && stackState.activeSession && (
+                  <Animated.View
+                    style={[
+                      styles.developingSurfaceWrapper,
+                      { height: availableSurfaceHeight },
+                      developingSurfaceAnimatedStyle,
+                    ]}
+                    pointerEvents={stackState.embersFocus === 'developing' ? 'auto' : 'none'}
+                  >
+                    <EmberSessionScreen
+                      inquiryId={stackState.activeSession.inquiryId}
+                      initialMovement={stackState.activeSession.movement}
+                      hideHeader={true}
+                      onBack={focusEmber}
+                    />
+                  </Animated.View>
+                )}
               </View>
             )}
           </View>
@@ -565,6 +718,20 @@ const styles = StyleSheet.create({
   emberSurfaceWrapper: {
     position: 'absolute',
     top: RAIL_HEIGHT,
+    left: 0,
+    right: 0,
+  },
+  developingRailWrapper: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: RAIL_HEIGHT,
+    zIndex: 16,
+  },
+  developingSurfaceWrapper: {
+    position: 'absolute',
+    top: 2 * RAIL_HEIGHT,
     left: 0,
     right: 0,
   },
