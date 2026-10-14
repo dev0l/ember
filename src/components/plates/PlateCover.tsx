@@ -36,28 +36,28 @@ export function PlateCover({
       accessibilityRole="button"
       accessibilityLabel={`Open ${title} territory`}
     >
-      {/* Etch Text */}
-      {isTop ? (
+      {/* Etch Text (for top cover, stays near top edge) */}
+      {isTop && (etchTop || etchSub) ? (
         <View style={styles.topEtchContainer}>
-          <Text style={styles.etch}>{etchTop}</Text>
-          <Text style={styles.etchSub}>{etchSub}</Text>
+          {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
+          {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
         </View>
       ) : null}
 
-      {/* Cover Label (sits at the seam edge) */}
+      {/* Cover Label (sits precisely in the 48px seam edge) */}
       <View style={[styles.labelRow, isTop ? styles.labelRowBottom : styles.labelRowTop]}>
         <View style={styles.titleGroup}>
           <Text style={styles.dot}>•</Text>
-          <Text style={styles.title}>{title}</Text>
+          <Text style={styles.title} numberOfLines={1}>{title}</Text>
         </View>
         <Text style={styles.role}>{role}</Text>
       </View>
 
-      {/* Etch Text (for bottom cover) */}
-      {!isTop ? (
+      {/* Etch Text (for bottom cover, stays near bottom edge) */}
+      {!isTop && (etchTop || etchSub) ? (
         <View style={styles.bottomEtchContainer}>
-          <Text style={styles.etch}>{etchTop}</Text>
-          <Text style={styles.etchSub}>{etchSub}</Text>
+          {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
+          {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
         </View>
       ) : null}
     </Pressable>
@@ -70,13 +70,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#161511',
     borderWidth: 1,
     borderColor: '#4E3A2A',
-    justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingVertical: 18,
     position: 'absolute',
     left: 0,
     right: 0,
     zIndex: 6,
+    overflow: 'hidden',
   },
   topCover: {
     top: 0,
@@ -92,12 +90,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#1E1C16',
   },
   topEtchContainer: {
-    gap: 2,
-    marginTop: 8,
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    gap: 3,
   },
   bottomEtchContainer: {
-    gap: 2,
-    marginBottom: 8,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 20,
+    paddingBottom: 18,
+    gap: 3,
   },
   etch: {
     fontFamily: TYPOGRAPHY.fonts.mono,
@@ -114,37 +118,48 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   labelRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 48,
+    paddingHorizontal: 20,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    height: 48,
   },
   labelRowBottom: {
-    marginBottom: 0,
+    bottom: 0,
   },
   labelRowTop: {
-    marginTop: 0,
+    top: 0,
   },
   titleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flex: 1,
   },
   dot: {
-    fontSize: 18,
+    fontSize: 16,
     color: COLORS.emberOrange,
+    includeFontPadding: false,
   },
   title: {
-    fontSize: 22,
+    fontSize: 18,
+    lineHeight: 22,
     fontWeight: '600',
     color: '#F5ECE0',
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
+    maxWidth: '70%',
+    includeFontPadding: false,
   },
   role: {
     fontFamily: TYPOGRAPHY.fonts.mono,
-    fontSize: 12,
-    letterSpacing: 1.5,
+    fontSize: 11,
+    letterSpacing: 1.2,
     color: '#BAA28A',
     textTransform: 'uppercase',
+    includeFontPadding: false,
   },
 });
+

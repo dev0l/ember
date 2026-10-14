@@ -19,9 +19,15 @@ import { listProjects } from '@/services/ember-project-storage';
 
 export interface CollectionsScreenProps {
   hideHeader?: boolean;
+  onSelectEmber?: (id: string, ember?: EmberSeed) => void;
+  selectedEmberId?: string | null;
 }
 
-export default function CollectionsScreen({ hideHeader = false }: CollectionsScreenProps = {}) {
+export default function CollectionsScreen({
+  hideHeader = false,
+  onSelectEmber,
+  selectedEmberId = null,
+}: CollectionsScreenProps = {}) {
   const [tab, setTab] = useState<'seeds' | 'projects'>('seeds');
   const [embers, setEmbers] = useState<EmberSeed[]>([]);
   const [projects, setProjects] = useState<EmberProject[]>([]);
@@ -47,15 +53,26 @@ export default function CollectionsScreen({ hideHeader = false }: CollectionsScr
   const activeTab = legacyProjects.length > 0 ? tab : 'seeds';
 
   const handleOpenEmber = useCallback((id: string) => {
+    if (onSelectEmber) {
+      const seed = embers.find((e) => e.id === id);
+      onSelectEmber(id, seed);
+      return;
+    }
     router.push(`/(main)/ember/${id}` as any);
-  }, []);
+  }, [embers, onSelectEmber]);
 
   const handleOpenProject = useCallback((project: EmberProject) => {
     // Route through Ember View when the project has a seed association
     if (project.seedId) {
+      if (onSelectEmber) {
+        const seed = embers.find((e) => e.id === project.seedId);
+        onSelectEmber(project.seedId, seed);
+        return;
+      }
       router.push(`/(main)/ember/${project.seedId}` as any);
       return;
     }
+
     // Legacy projects without seedId — direct access
     if (project.designPackVersion > 0 || project.status === 'generated') {
       Alert.alert(
@@ -169,7 +186,10 @@ export default function CollectionsScreen({ hideHeader = false }: CollectionsScr
               contentContainerStyle={styles.listContent}
               renderItem={({ item }) => (
                 <Pressable
-                  style={styles.card}
+                  style={[
+                    styles.card,
+                    selectedEmberId === item.id && styles.cardSelected,
+                  ]}
                   onPress={() => handleOpenEmber(item.id)}
                 >
                   <View style={styles.cardHeader}>
@@ -422,6 +442,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: SPACING.md,
     gap: SPACING.xs,
+  },
+  cardSelected: {
+    borderColor: COLORS.emberOrange,
+    backgroundColor: 'rgba(255, 107, 43, 0.08)',
   },
   cardHeader: {
     flexDirection: 'row',

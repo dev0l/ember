@@ -14,13 +14,15 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS } from '@/theme';
+import { COLORS, TYPOGRAPHY } from '@/theme';
 
-import { StageMode, TerritoryStackState } from './types';
-import { RAIL_HEIGHT } from './PlateRail';
+import { StageMode, TerritoryStackState, EmberPlateData } from './types';
+import { PlateRail, RAIL_HEIGHT } from './PlateRail';
 import { PlateCover } from './PlateCover';
 import CollectionsScreen from '@/app/(main)/collections';
 import SparksScreen from '@/app/(main)/sparks';
+import EmberViewScreen from '@/app/(main)/ember/[id]';
+import type { EmberSeed } from '@/core';
 
 const ANIM_DURATION = 550;
 const ANIM_EASING = Easing.bezier(0.32, 0.04, 0.18, 1);
@@ -30,59 +32,160 @@ export function TerritoryStage() {
   const [stageHeight, setStageHeight] = useState<number>(0);
 
   // Stacking state architecture — preserving per-territory lineages
+  // Law I: Plate order represents lineage, not focus. Focus changes expansion, not order.
+  // Law II: Switching between territories collapses the inactive territory as a unit and restores its stack on return.
   const [stackState, setStackState] = useState<TerritoryStackState>({
     activeTerritory: null,
-    embersStack: [{ id: 'embers-root', title: 'Embers', role: 'COLLECTION', depth: 0 }],
-    sparksStack: [{ id: 'sparks-root', title: 'Sparks', role: 'COLLECTION', depth: 0 }],
+    embersFocus: 'collection',
+    selectedEmber: null,
+    lastEmbersFocus: 'collection',
   });
 
   const openProgress = useSharedValue(0);
+  const emberFocusProgress = useSharedValue(0);
 
   const travel = stageHeight > 0 ? stageHeight / 2 - RAIL_HEIGHT : 0;
+  const interiorHeight = Math.max(0, stageHeight - 2 * RAIL_HEIGHT);
+  const availableSurfaceHeight = Math.max(0, interiorHeight - RAIL_HEIGHT);
 
   // ── Mode Transitions ──
   const openEmbers = useCallback(() => {
     setMode('embers');
-    setStackState((prev) => ({ ...prev, activeTerritory: 'embers' }));
+    setStackState((prev) => {
+      const targetFocus = prev.lastEmbersFocus;
+      emberFocusProgress.value = withTiming(
+        prev.selectedEmber && targetFocus === 'ember' ? 1 : 0,
+        { duration: ANIM_DURATION, easing: ANIM_EASING },
+      );
+      return {
+        ...prev,
+        activeTerritory: 'embers',
+        embersFocus: prev.selectedEmber ? targetFocus : 'collection',
+      };
+    });
     openProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
-  }, [openProgress]);
+  }, [openProgress, emberFocusProgress]);
 
   const openSparks = useCallback(() => {
     setMode('sparks');
-    setStackState((prev) => ({ ...prev, activeTerritory: 'sparks' }));
+    setStackState((prev) => ({
+      ...prev,
+      activeTerritory: 'sparks',
+      lastEmbersFocus: prev.embersFocus,
+    }));
     openProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
   }, [openProgress]);
 
   const returnToSplit = useCallback(() => {
     setMode('split');
-    setStackState((prev) => ({ ...prev, activeTerritory: null }));
+    setStackState((prev) => ({
+      ...prev,
+      activeTerritory: null,
+      lastEmbersFocus: prev.embersFocus,
+    }));
     openProgress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
   }, [openProgress]);
+
+  // ── Lineage & Focus Actions ──
+  const handleSelectEmber = useCallback(
+    (id: string, seed?: EmberSeed) => {
+      const emberData: EmberPlateData = {
+        id,
+        title: seed?.name || 'Untitled Ember',
+        nature: seed?.nature,
+      };
+      setStackState((prev) => ({
+        ...prev,
+        selectedEmber: emberData,
+        embersFocus: 'ember',
+        lastEmbersFocus: 'ember',
+      }));
+      emberFocusProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    },
+    [emberFocusProgress],
+  );
+
+  const focusCollection = useCallback(() => {
+    setStackState((prev) => ({
+      ...prev,
+      embersFocus: 'collection',
+      lastEmbersFocus: 'collection',
+    }));
+    emberFocusProgress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [emberFocusProgress]);
+
+  const focusEmber = useCallback(() => {
+    if (!stackState.selectedEmber) return;
+    setStackState((prev) => ({
+      ...prev,
+      embersFocus: 'ember',
+      lastEmbersFocus: 'ember',
+    }));
+    emberFocusProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [stackState.selectedEmber, emberFocusProgress]);
+
+  const dismissEmber = useCallback(() => {
+    emberFocusProgress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    setStackState((prev) => ({
+      ...prev,
+      selectedEmber: null,
+      embersFocus: 'collection',
+      lastEmbersFocus: 'collection',
+    }));
+  }, [emberFocusProgress]);
 
   // ── Android Back Handler ──
   useEffect(() => {
     const onHardwareBack = () => {
-      if (mode !== 'split') {
-        returnToSplit();
-        return true; // Event consumed; do not pop Expo Router stack
+      if (mode === 'split') {
+        return false;
       }
-      return false; // At split root, let OS handle back
+      if (mode === 'sparks') {
+        returnToSplit();
+        return true;
+      }
+      if (mode === 'embers') {
+        if (stackState.selectedEmber) {
+          if (stackState.embersFocus === 'ember') {
+            focusCollection();
+            return true;
+          }
+          if (stackState.embersFocus === 'collection') {
+            dismissEmber();
+            return true;
+          }
+        }
+        returnToSplit();
+        return true;
+      }
+      return false;
     };
 
     const subscription = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
     return () => subscription.remove();
-  }, [mode, returnToSplit]);
+  }, [
+    mode,
+    stackState.selectedEmber,
+    stackState.embersFocus,
+    focusCollection,
+    dismissEmber,
+    returnToSplit,
+  ]);
 
   // ── Plate Tap Handlers ──
   const handleTopPlatePress = useCallback(() => {
     if (mode === 'split') {
       openEmbers();
     } else if (mode === 'embers') {
-      returnToSplit();
+      if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
+        focusCollection();
+      } else {
+        returnToSplit();
+      }
     } else if (mode === 'sparks') {
       openEmbers();
     }
-  }, [mode, openEmbers, returnToSplit]);
+  }, [mode, stackState.selectedEmber, stackState.embersFocus, openEmbers, focusCollection, returnToSplit]);
 
   const handleBottomPlatePress = useCallback(() => {
     if (mode === 'split') {
@@ -116,15 +219,38 @@ export function TerritoryStage() {
     opacity: openProgress.value,
   }));
 
+  const emberRailAnimatedStyle = useAnimatedStyle(() => {
+    const topOffset = availableSurfaceHeight * (1 - emberFocusProgress.value);
+    return {
+      transform: [{ translateY: topOffset }],
+    };
+  });
+
+  const collectionsSurfaceAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: 1 - emberFocusProgress.value,
+  }));
+
+  const emberSurfaceAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: emberFocusProgress.value,
+  }));
+
   const halfHeight = stageHeight > 0 ? stageHeight / 2 : 280;
 
   // Dynamic roles based on territory and active mode
-  const topRole =
-    mode === 'split'
-      ? 'OPEN ↓'
-      : mode === 'embers'
-      ? 'HERE ◆'
+  let topRole = 'OPEN ↓';
+  if (mode === 'split') {
+    topRole = 'OPEN ↓';
+  } else if (mode === 'embers') {
+    if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
+      topRole = 'COLLECTION ↑';
+    } else {
+      topRole = 'HERE ◆';
+    }
+  } else if (mode === 'sparks') {
+    topRole = stackState.selectedEmber
+      ? `RETURN · ${stackState.selectedEmber.title}`
       : 'OPEN ↑';
+  }
 
   const bottomRole =
     mode === 'split'
@@ -132,6 +258,22 @@ export function TerritoryStage() {
       : mode === 'sparks'
       ? 'HERE ◆'
       : 'OPEN ↓';
+
+  // Dynamic status hint
+  let footerHint = 'Draw the plates apart. Their edges stay.';
+  if (mode === 'sparks') {
+    footerHint = stackState.selectedEmber
+      ? `Sparks open. Embers held with ${stackState.selectedEmber.title}.`
+      : 'Sparks open. Embers held at the upper edge.';
+  } else if (mode === 'embers') {
+    if (stackState.selectedEmber && stackState.embersFocus === 'ember') {
+      footerHint = `${stackState.selectedEmber.title} open. Embers collection held above.`;
+    } else if (stackState.selectedEmber && stackState.embersFocus === 'collection') {
+      footerHint = `Embers collection open. ${stackState.selectedEmber.title} held below.`;
+    } else {
+      footerHint = 'Embers open. Sparks held at the lower edge.';
+    }
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -143,26 +285,39 @@ export function TerritoryStage() {
         </View>
 
         <View style={styles.headerActions}>
-          <Pressable
-            style={[styles.headerButton, mode === 'split' && styles.headerButtonDisabled]}
-            onPress={returnToSplit}
-            disabled={mode === 'split'}
-            hitSlop={8}
-          >
-            <Text style={[styles.headerButtonText, mode === 'split' && styles.disabledText]}>
-              Back
-            </Text>
-          </Pressable>
+          {mode === 'embers' && stackState.selectedEmber && (
+            <Pressable
+              style={styles.headerButton}
+              onPress={() => {
+                if (stackState.embersFocus === 'ember') {
+                  focusCollection();
+                } else {
+                  dismissEmber();
+                }
+              }}
+              hitSlop={8}
+            >
+              <Text style={styles.headerButtonText}>
+                {stackState.embersFocus === 'ember' ? '← Embers' : 'Deselect'}
+              </Text>
+            </Pressable>
+          )}
 
-          <Pressable
-            style={[styles.headerButton, mode === 'split' && styles.headerButtonActive]}
-            onPress={returnToSplit}
-            hitSlop={8}
-          >
-            <Text style={[styles.headerButtonText, mode === 'split' && styles.activeButtonText]}>
-              Split
-            </Text>
-          </Pressable>
+          {mode !== 'split' && (
+            <Pressable
+              style={styles.headerButton}
+              onPress={returnToSplit}
+              hitSlop={8}
+            >
+              <Text style={styles.splitButtonText}>Split</Text>
+            </Pressable>
+          )}
+
+          {mode === 'split' && (
+            <View style={styles.splitBadge}>
+              <Text style={styles.splitBadgeText}>SPLIT</Text>
+            </View>
+          )}
         </View>
       </View>
 
@@ -173,12 +328,82 @@ export function TerritoryStage() {
           style={[styles.territory, surfaceAnimatedStyle]}
           pointerEvents={mode === 'split' ? 'none' : 'auto'}
         >
-          {/* Embers Territory Surface */}
+          {/* ── Embers Territory Surface ── */}
           <View style={[styles.surfaceContainer, mode !== 'embers' && styles.hidden]}>
-            <CollectionsScreen hideHeader={true} />
+            {stackState.selectedEmber === null ? (
+              // Root view: full collections list
+              <CollectionsScreen
+                hideHeader={true}
+                onSelectEmber={handleSelectEmber}
+                selectedEmberId={null}
+              />
+            ) : (
+              // Stacked lineage: CollectionsScreen above, Ember plate below
+              <View style={styles.stackedTerritory}>
+                {/* 1. Collections Surface (expands when focus is 'collection') */}
+                <Animated.View
+                  style={[
+                    styles.collectionsSurfaceWrapper,
+                    { height: availableSurfaceHeight },
+                    collectionsSurfaceAnimatedStyle,
+                  ]}
+                  pointerEvents={stackState.embersFocus === 'collection' ? 'auto' : 'none'}
+                >
+                  <CollectionsScreen
+                    hideHeader={true}
+                    onSelectEmber={handleSelectEmber}
+                    selectedEmberId={stackState.selectedEmber.id}
+                  />
+                </Animated.View>
+
+                {/* 2. Ember Plate Rail (translates between y=0 and y=availableSurfaceHeight) */}
+                <Animated.View
+                  style={[
+                    styles.emberRailWrapper,
+                    emberRailAnimatedStyle,
+                  ]}
+                  pointerEvents="auto"
+                >
+                  <PlateRail
+                    title={stackState.selectedEmber.title}
+                    subtitle={
+                      stackState.selectedEmber.nature
+                        ? stackState.selectedEmber.nature.toUpperCase()
+                        : undefined
+                    }
+                    role={stackState.embersFocus === 'ember' ? 'HERE ◆' : 'OPEN ↓'}
+                    isActive={stackState.embersFocus === 'ember'}
+                    position="middle"
+                    onPress={() => {
+                      if (stackState.embersFocus === 'collection') {
+                        focusEmber();
+                      } else {
+                        focusCollection();
+                      }
+                    }}
+                  />
+                </Animated.View>
+
+                {/* 3. Ember View Surface (expands when focus is 'ember', positioned under the Ember rail) */}
+                <Animated.View
+                  style={[
+                    styles.emberSurfaceWrapper,
+                    { height: availableSurfaceHeight },
+                    emberSurfaceAnimatedStyle,
+                  ]}
+                  pointerEvents={stackState.embersFocus === 'ember' ? 'auto' : 'none'}
+                >
+                  <EmberViewScreen
+                    emberId={stackState.selectedEmber.id}
+                    hideHeader={true}
+                    onBack={focusCollection}
+                  />
+                </Animated.View>
+              </View>
+            )}
           </View>
 
-          {/* Sparks Territory Surface */}
+          {/* ── Sparks Territory Surface ── */}
           <View style={[styles.surfaceContainer, mode !== 'sparks' && styles.hidden]}>
             <SparksScreen hideHeader={true} />
           </View>
@@ -225,13 +450,7 @@ export function TerritoryStage() {
 
       {/* ── Footer Territory Status Hint ── */}
       <View style={styles.footer}>
-        <Text style={styles.hintText}>
-          {mode === 'split'
-            ? 'Draw the plates apart. Their edges stay.'
-            : mode === 'embers'
-            ? 'Embers open. Sparks held at the lower edge.'
-            : 'Sparks open. Embers held at the upper edge.'}
-        </Text>
+        <Text style={styles.hintText}>{footerHint}</Text>
       </View>
     </SafeAreaView>
   );
@@ -270,30 +489,37 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
+    gap: 12,
   },
   headerButton: {
     paddingVertical: 6,
     paddingHorizontal: 8,
-  },
-  headerButtonActive: {
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.emberOrange,
-  },
-  headerButtonDisabled: {
-    opacity: 0.35,
   },
   headerButtonText: {
     fontSize: 12,
     color: COLORS.textSecondary,
     letterSpacing: 0.5,
   },
-  disabledText: {
-    color: '#665E54',
-  },
-  activeButtonText: {
-    color: COLORS.emberOrange,
+  splitButtonText: {
+    fontSize: 12,
     fontWeight: '600',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.5,
+  },
+  splitBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.05)',
+  },
+  splitBadgeText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+    fontWeight: '700',
   },
   stage: {
     flex: 1,
@@ -317,6 +543,30 @@ const styles = StyleSheet.create({
   },
   hidden: {
     display: 'none',
+  },
+  stackedTerritory: {
+    ...StyleSheet.absoluteFill,
+    position: 'relative',
+  },
+  collectionsSurfaceWrapper: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+  },
+  emberRailWrapper: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: RAIL_HEIGHT,
+    zIndex: 15,
+  },
+  emberSurfaceWrapper: {
+    position: 'absolute',
+    top: RAIL_HEIGHT,
+    left: 0,
+    right: 0,
   },
   coverWrapper: {
     position: 'absolute',

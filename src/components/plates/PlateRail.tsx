@@ -8,7 +8,7 @@ export interface PlateRailProps {
   role?: string;
   isActive?: boolean;
   onPress: () => void;
-  position?: 'top' | 'bottom';
+  position?: 'top' | 'bottom' | 'middle';
 }
 
 export const RAIL_HEIGHT = 48;
@@ -21,11 +21,18 @@ export function PlateRail({
   onPress,
   position = 'top',
 }: PlateRailProps) {
+  const positionStyle =
+    position === 'top'
+      ? styles.topRail
+      : position === 'bottom'
+      ? styles.bottomRail
+      : styles.middleRail;
+
   return (
     <Pressable
       style={({ pressed }) => [
         styles.rail,
-        position === 'top' ? styles.topRail : styles.bottomRail,
+        positionStyle,
         isActive && styles.activeRail,
         pressed && styles.pressedRail,
       ]}
@@ -35,8 +42,14 @@ export function PlateRail({
     >
       <View style={styles.leftContainer}>
         <Text style={[styles.dot, isActive && styles.activeDot]}>•</Text>
-        <Text style={[styles.title, isActive && styles.activeTitle]}>{title}</Text>
-        {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
+        <Text style={[styles.title, isActive && styles.activeTitle]} numberOfLines={1}>
+          {title}
+        </Text>
+        {subtitle ? (
+          <Text style={styles.subtitle} numberOfLines={1}>
+            {subtitle}
+          </Text>
+        ) : null}
       </View>
 
       {role ? (
@@ -68,6 +81,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: 0,
     borderTopWidth: 1,
   },
+  middleRail: {
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderTopColor: '#5A4330',
+    borderBottomColor: '#3A2B1E',
+  },
+
   activeRail: {
     borderColor: '#8C5632',
     backgroundColor: '#25211B',
@@ -93,6 +113,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.textPrimary,
     letterSpacing: 0.5,
+    includeFontPadding: false,
   },
   activeTitle: {
     color: '#FFF2E0',
@@ -103,6 +124,7 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginLeft: 4,
     maxWidth: '50%',
+    includeFontPadding: false,
   },
   rightContainer: {
     alignItems: 'flex-end',
@@ -113,6 +135,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     color: '#A8947E',
     textTransform: 'uppercase',
+    includeFontPadding: false,
   },
   activeRole: {
     color: COLORS.emberOrange,

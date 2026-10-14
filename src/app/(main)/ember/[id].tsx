@@ -9,7 +9,7 @@
 // annotations, and deeper exploration happen.
 // ─────────────────────────────────────────────
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -47,8 +47,19 @@ import {
   type InquiryState,
 } from '@/inquiry';
 
-export default function EmberViewScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export interface EmberViewScreenProps {
+  emberId?: string;
+  hideHeader?: boolean;
+  onBack?: () => void;
+}
+
+export default function EmberViewScreen({
+  emberId: propEmberId,
+  hideHeader = false,
+  onBack,
+}: EmberViewScreenProps = {}) {
+  const params = useLocalSearchParams<{ id: string }>();
+  const id = propEmberId || params.id;
   const [seed, setSeed] = useState<EmberSeed | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [participatingSparks, setParticipatingSparks] = useState<Spark[]>([]);
@@ -57,49 +68,57 @@ export default function EmberViewScreen() {
   const [designPack, setDesignPack] = useState<{ version: number; staleness: 'current' | 'stale' | 'unknown' } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Reload every time this screen comes into focus (e.g. after editing or returning from session)
-  useFocusEffect(
-    useCallback(() => {
-      if (!id) return;
-      setLoading(true);
-      const loadedSeed = loadEmber(id);
-      const loadedMarkdown = loadEmberMarkdown(id);
-      setSeed(loadedSeed);
-      setMarkdown(loadedMarkdown);
+  // Reload data whenever id changes or screen comes into focus
+  const loadData = useCallback(() => {
+    if (!id) return;
+    setLoading(true);
+    const loadedSeed = loadEmber(id);
+    const loadedMarkdown = loadEmberMarkdown(id);
+    setSeed(loadedSeed);
+    setMarkdown(loadedMarkdown);
 
-      // Find Sparks that participate in this Ember
-      const associated = listSparks('ember-associated')
-        .filter(s => s.emberId === id);
-      setParticipatingSparks(associated);
+    // Find Sparks that participate in this Ember
+    const associated = listSparks('ember-associated')
+      .filter(s => s.emberId === id);
+    setParticipatingSparks(associated);
 
-      // Ensure an Inquiry exists for this Ember and evaluate its engine state
-      const inq = ensureInquiryForEmber(id, loadedSeed?.name);
-      setInquiryInfo(inq);
+    // Ensure an Inquiry exists for this Ember and evaluate its engine state
+    const inq = ensureInquiryForEmber(id, loadedSeed?.name);
+    setInquiryInfo(inq);
 
-      const evidence = loadInquiryEvidence(inq.id);
-      const state = evaluateInquiry(evidence);
-      setInquiryState(state);
+    const evidence = loadInquiryEvidence(inq.id);
+    const state = evaluateInquiry(evidence);
+    setInquiryState(state);
 
-      // Load latest Design Pack if one exists
-      const pack = loadLatestDesignPack(inq.id);
-      if (pack) {
-        const staleness = designPackStaleness(pack.record?.reviewFingerprint, state);
-        setDesignPack({ version: pack.version, staleness });
-      } else {
-        setDesignPack(null);
-      }
+    // Load latest Design Pack if one exists
+    const pack = loadLatestDesignPack(inq.id);
+    if (pack) {
+      const staleness = designPackStaleness(pack.record?.reviewFingerprint, state);
+      setDesignPack({ version: pack.version, staleness });
+    } else {
+      setDesignPack(null);
+    }
 
-      setLoading(false);
-    }, [id]),
-  );
+    setLoading(false);
+  }, [id]);
+
+  useFocusEffect(loadData);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleBack = useCallback(() => {
+    if (onBack) {
+      onBack();
+      return;
+    }
     if (router.canGoBack()) {
       router.back();
     } else {
       router.replace('/');
     }
-  }, []);
+  }, [onBack]);
 
   const handleEdit = useCallback(() => {
     if (id) {
@@ -227,27 +246,29 @@ export default function EmberViewScreen() {
     );
   }, [seed, id, inquiryState, designPack, participatingSparks]);
 
+  const Container = hideHeader ? View : SafeAreaView;
+
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
+      <Container style={styles.container}>
         <View style={styles.loadingContainer}>
           <ActivityIndicator color={COLORS.emberOrange} size="large" />
           <Text style={styles.loadingText}>Loading Ember...</Text>
         </View>
-      </SafeAreaView>
+      </Container>
     );
   }
 
   if (!seed || !markdown) {
     return (
-      <SafeAreaView style={styles.container}>
+      <Container style={styles.container}>
         <View style={styles.loadingContainer}>
           <Text style={styles.errorText}>Ember not found</Text>
           <Pressable onPress={handleBack} style={styles.backButtonCenter}>
             <Text style={styles.backButtonText}>Return to Hub</Text>
           </Pressable>
         </View>
-      </SafeAreaView>
+      </Container>
     );
   }
 
@@ -258,24 +279,36 @@ export default function EmberViewScreen() {
   const displayMarkdown = markdown.replace(/^---\n[\s\S]*?\n---\n*/, '');
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       {/* ── Header Bar ── */}
-      <View style={styles.headerBar}>
-        <Pressable onPress={handleBack} hitSlop={12}>
-          <Text style={styles.backArrow}>←</Text>
-        </Pressable>
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {title}
+      {!hideHeader ? (
+        <>
+          <View style={styles.headerBar}>
+            <Pressable onPress={handleBack} hitSlop={12}>
+              <Text style={styles.backArrow}>←</Text>
+            </Pressable>
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                {title}
+              </Text>
+            </View>
+            <Pressable onPress={handleEdit} hitSlop={12}>
+              <Text style={styles.editButton}>Edit</Text>
+            </Pressable>
+          </View>
+          <View style={styles.divider} />
+        </>
+      ) : (
+        <View style={styles.embeddedHeader}>
+          <Text style={styles.embeddedNature}>
+            {seed.nature ? seed.nature.toUpperCase() : 'EMBER'}
+            {participatingSparks.length > 0 ? ` · ${participatingSparks.length} SPARKS` : ''}
           </Text>
+          <Pressable onPress={handleEdit} hitSlop={12} style={styles.embeddedEditButton}>
+            <Text style={styles.embeddedEditText}>Edit Ember →</Text>
+          </Pressable>
         </View>
-        <Pressable onPress={handleEdit} hitSlop={12}>
-          <Text style={styles.editButton}>Edit</Text>
-        </Pressable>
-      </View>
-
-      {/* ── Divider ── */}
-      <View style={styles.divider} />
+      )}
 
       {/* ── Markdown Content ── */}
       <ScrollView
@@ -431,7 +464,7 @@ export default function EmberViewScreen() {
           </Text>
         </Pressable>
       </ScrollView>
-    </SafeAreaView>
+    </Container>
   );
 }
 
@@ -607,6 +640,31 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.emberOrange,
     paddingHorizontal: SPACING.xs,
+  },
+  embeddedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.08)',
+  },
+  embeddedNature: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+  },
+  embeddedEditButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+  },
+  embeddedEditText: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    letterSpacing: 0.5,
   },
 
   // Divider
