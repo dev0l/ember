@@ -419,7 +419,10 @@ export default function EmberViewScreen({
             !designPack && inquiryState.designPack.developing ? (
               <Pressable onPress={handleDevelop} style={styles.developButton}>
                 <Text style={styles.developButtonText}>
-                  Developing
+                  {inquiryState.designPack.outstanding.length === 0 &&
+                  inquiryState.designPack.blockers.length > 0
+                    ? 'Investigating'
+                    : 'Developing'}
                 </Text>
                 <Text style={styles.developButtonHint}>
                   {(() => {
@@ -440,7 +443,7 @@ export default function EmberViewScreen({
                       return 'Authored coverage boundary reached · tap to inspect';
                     }
                     if (!inquiryState.designPack.adoptionValid) {
-                      return 'Configuration adoption required';
+                      return 'Configuration available · tap to adopt or investigate';
                     }
                     return 'Review confirmation required';
                   })()}

@@ -22,6 +22,9 @@ import {
   Modal,
   KeyboardAvoidingView,
   Platform,
+  Share,
+  TurboModuleRegistry,
+  type TurboModule,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -57,6 +60,7 @@ export interface EmberSessionScreenProps {
   hideHeader?: boolean;
   onBack?: () => void;
   onMovementChange?: (movement: Movement) => void;
+  onInvestigationStateChange?: (isInvestigating: boolean) => void;
   onCloseSession?: () => void;
 }
 
@@ -66,6 +70,7 @@ export default function EmberSessionScreen({
   hideHeader = false,
   onBack,
   onMovementChange,
+  onInvestigationStateChange,
   onCloseSession,
 }: EmberSessionScreenProps = {}) {
   const params = useLocalSearchParams<{
@@ -84,11 +89,21 @@ export default function EmberSessionScreen({
   const [investigatingQuestionId, setInvestigatingQuestionId] = useState<string | null>(null);
   const [isInvestigating, setIsInvestigating] = useState(false);
 
+  // Recognition Moment state when Investigation resolves blockers into configuration availability
+  const [awaitingAdoptionRecognition, setAwaitingAdoptionRecognition] = useState(false);
+  const [adoptionRecognized, setAdoptionRecognized] = useState(false);
+
+  // Copy feedback for authored coverage boundary explanations
+  const [copiedBoundaryKey, setCopiedBoundaryKey] = useState<string | null>(null);
+
   useEffect(() => {
     if (inquiryId) {
       setEvidence(loadInquiryEvidence(inquiryId));
       setInvestigatingQuestionId(null);
       setIsInvestigating(false);
+      setAwaitingAdoptionRecognition(false);
+      setAdoptionRecognized(false);
+      setCopiedBoundaryKey(null);
     }
   }, [inquiryId]);
 
@@ -97,6 +112,9 @@ export default function EmberSessionScreen({
       setMovement(propMovement);
       setInvestigatingQuestionId(null);
       setIsInvestigating(false);
+      setAwaitingAdoptionRecognition(false);
+      setAdoptionRecognized(false);
+      setCopiedBoundaryKey(null);
     }
   }, [propMovement]);
 
@@ -131,6 +149,52 @@ export default function EmberSessionScreen({
     if (!activeQuestion) return undefined;
     return inquiryState.questions.find((q) => q.id === activeQuestion.id);
   }, [activeQuestion, inquiryState.questions]);
+
+  // Track when Inquiry enters an active blocker/investigation threshold so resolving it
+  // triggers the deliberate Configuration Available recognition moment before adoption.
+  useEffect(() => {
+    if (
+      !hasGeneratedPack &&
+      movement === 'develop' &&
+      inquiryState.designPack.chosen &&
+      inquiryState.designPack.blockers.length > 0
+    ) {
+      setAwaitingAdoptionRecognition(true);
+      setAdoptionRecognized(false);
+    }
+  }, [
+    hasGeneratedPack,
+    movement,
+    inquiryState.designPack.chosen,
+    inquiryState.designPack.blockers.length,
+  ]);
+
+  // Screen-sensitive Investigating posture (drives the third plate rail label without adding a new engine movement)
+  const isScreenInvestigating = useMemo(() => {
+    if (hasGeneratedPack) return false;
+    if (investigatingQuestionId !== null || isInvestigating) return true;
+    if (
+      movement === 'develop' &&
+      inquiryState.designPack.chosen &&
+      !nextUnansweredQuestion &&
+      inquiryState.designPack.blockers.length > 0
+    ) {
+      return true;
+    }
+    return false;
+  }, [
+    hasGeneratedPack,
+    investigatingQuestionId,
+    isInvestigating,
+    movement,
+    inquiryState.designPack.chosen,
+    nextUnansweredQuestion,
+    inquiryState.designPack.blockers.length,
+  ]);
+
+  useEffect(() => {
+    onInvestigationStateChange?.(isScreenInvestigating);
+  }, [isScreenInvestigating, onInvestigationStateChange]);
 
   // Form input state
   const [currentAnswer, setCurrentAnswer] = useState('');
@@ -199,6 +263,13 @@ export default function EmberSessionScreen({
     const nextEvidence = loadInquiryEvidence(inquiryId);
     setEvidence(nextEvidence);
 
+    // If resolving or re-examining a question from Investigation, require explicit
+    // recognition when configuration coverage becomes available before adoption.
+    if (investigatingQuestionId !== null) {
+      setAwaitingAdoptionRecognition(true);
+      setAdoptionRecognized(false);
+    }
+
     // Clear targeted investigation question so any newly unlocked conditional
     // questions flow forward via nextQuestion, or return to the threshold.
     setInvestigatingQuestionId(null);
@@ -208,7 +279,27 @@ export default function EmberSessionScreen({
     setCurrentAnswer('');
     setSelectedChoice(null);
     setSpecificationText('');
-  }, [inquiryId, activeQuestion, selectedChoice, currentAnswer, specificationText]);
+  }, [inquiryId, activeQuestion, selectedChoice, currentAnswer, specificationText, investigatingQuestionId]);
+
+  // Copy coverage boundary explanation to clipboard (with Share fallback)
+  const handleCopyBoundaryExplanation = useCallback(async (key: string, text: string) => {
+    try {
+      const nativeClipboard = TurboModuleRegistry.get<
+        TurboModule & { setString?: (content: string) => void }
+      >('Clipboard');
+      if (nativeClipboard && typeof nativeClipboard.setString === 'function') {
+        nativeClipboard.setString(text);
+        setCopiedBoundaryKey(key);
+        setTimeout(() => {
+          setCopiedBoundaryKey((prev) => (prev === key ? null : prev));
+        }, 2200);
+        return;
+      }
+      await Share.share({ message: text });
+    } catch {
+      // Ignore cancellation or clipboard fallback errors
+    }
+  }, []);
 
   // Adopt configuration act
   const handleAdoptConfig = useCallback((cfgId: string) => {
@@ -374,7 +465,11 @@ export default function EmberSessionScreen({
               <Text style={styles.backArrow}>←</Text>
             </Pressable>
             <Text style={styles.headerTitle}>
-              {movement === 'explore' ? 'Explore' : 'Develop'}
+              {isScreenInvestigating
+                ? 'Investigating'
+                : movement === 'explore'
+                ? 'Explore'
+                : 'Develop'}
             </Text>
             <Pressable onPress={returnToEmber} hitSlop={12}>
               <Text style={styles.doneText}>Done</Text>
@@ -608,7 +703,7 @@ export default function EmberSessionScreen({
                       {recordedUncertainty && (
                         <View style={styles.uncertaintyCallout}>
                           <Text style={styles.uncertaintyLabel}>RECORDED UNCERTAINTY (EXPLORE)</Text>
-                          <Text style={styles.uncertaintyText}>“{recordedUncertainty}”</Text>
+                          <Text selectable style={styles.uncertaintyText}>“{recordedUncertainty}”</Text>
                         </View>
                       )}
 
@@ -636,61 +731,123 @@ export default function EmberSessionScreen({
                   {(knowledgeBoundaryBlockers.length > 0 || uncoveredCombinationBlockers.length > 0) && (
                     <View style={styles.investigationGroup}>
                       <Text style={styles.boundaryBadge}>AUTHORED COVERAGE BOUNDARY</Text>
-                      <Text style={styles.boundaryHeading}>Beyond Current Configuration Perimeter</Text>
-                      <Text style={styles.finishBody}>
+                      <Text selectable style={styles.boundaryHeading}>
+                        Beyond Current Configuration Perimeter
+                      </Text>
+                      <Text selectable style={styles.finishBody}>
                         Your recorded requirements are valid, but reach beyond the self-contained local configurations authored in Ember’s current library. Do not change truthful requirements merely to satisfy the engine. Only if your intended first-version scope changes, you may re-examine the decision below:
                       </Text>
 
-                      {knowledgeBoundaryBlockers.map(({ blocker, sourceQuestion, answerLabel }, idx) => (
-                        <View key={`kb-${idx}`} style={styles.blockerCard}>
-                          <Text style={styles.blockerTitle}>{blocker.detail}</Text>
-                          {sourceQuestion && (
-                            <Text style={styles.blockerDetail}>
-                              Question: {sourceQuestion.text}
-                            </Text>
-                          )}
-                          {answerLabel && (
-                            <Text style={styles.blockerDetail}>
-                              Recorded answer: {answerLabel}
-                              {blocker.preservedText ? ` (“${blocker.preservedText}”)` : ''}
-                            </Text>
-                          )}
-                          {sourceQuestion && (
-                            <Pressable
-                              onPress={() => setInvestigatingQuestionId(sourceQuestion.id)}
-                              style={styles.boundaryReexamineBtn}
-                            >
-                              <Text style={styles.investigationActionLink}>
-                                Re-examine first-version scope →
-                              </Text>
-                            </Pressable>
-                          )}
-                        </View>
-                      ))}
+                      {knowledgeBoundaryBlockers.map(({ blocker, sourceQuestion, answerLabel }, idx) => {
+                        const copyKey = `kb-${idx}`;
+                        const copyText = [
+                          blocker.detail,
+                          sourceQuestion ? `Question: ${sourceQuestion.text}` : undefined,
+                          answerLabel
+                            ? `Recorded answer: ${answerLabel}${
+                                blocker.preservedText ? ` (“${blocker.preservedText}”)` : ''
+                              }`
+                            : undefined,
+                        ]
+                          .filter(Boolean)
+                          .join('\n');
 
-                      {uncoveredCombinationBlockers.map((b, idx) => (
-                        <View key={`uc-${idx}`} style={styles.blockerCard}>
-                          <Text style={styles.blockerTitle}>{b.detail}</Text>
-                          <Text style={styles.blockerDetail}>
-                            Contributing decisions for this combination:
-                          </Text>
-                          {capabilityEstablishingQuestions.map(({ state: qs, authored, label }) => (
-                            <Pressable
-                              key={qs.id}
-                              onPress={() => setInvestigatingQuestionId(qs.id)}
-                              style={styles.combinationQuestionRow}
-                            >
-                              <Text style={styles.investigationQuestionText}>
-                                {authored?.text ?? qs.id}
+                        return (
+                          <View key={copyKey} style={styles.blockerCard}>
+                            <Text selectable style={styles.blockerTitle}>
+                              {blocker.detail}
+                            </Text>
+                            {sourceQuestion && (
+                              <Text selectable style={styles.blockerDetail}>
+                                Question: {sourceQuestion.text}
                               </Text>
-                              <Text style={styles.investigationAnswerText}>{label}</Text>
-                              <Text style={styles.investigationActionLink}>
-                                Tap to re-examine first-version scope →
+                            )}
+                            {answerLabel && (
+                              <Text selectable style={styles.blockerDetail}>
+                                Recorded answer: {answerLabel}
+                                {blocker.preservedText ? ` (“${blocker.preservedText}”)` : ''}
                               </Text>
-                            </Pressable>
-                          ))}
-                        </View>
-                      ))}
+                            )}
+                            <View style={styles.boundaryActionRow}>
+                              <Pressable
+                                onPress={() => handleCopyBoundaryExplanation(copyKey, copyText)}
+                                hitSlop={8}
+                                style={styles.boundaryCopyBtn}
+                              >
+                                <Text style={styles.boundaryCopyText}>
+                                  {copiedBoundaryKey === copyKey
+                                    ? '✓ Copied to clipboard'
+                                    : 'Copy explanation'}
+                                </Text>
+                              </Pressable>
+                              {sourceQuestion && (
+                                <Pressable
+                                  onPress={() => setInvestigatingQuestionId(sourceQuestion.id)}
+                                  hitSlop={8}
+                                >
+                                  <Text style={styles.investigationActionLink}>
+                                    Re-examine first-version scope →
+                                  </Text>
+                                </Pressable>
+                              )}
+                            </View>
+                          </View>
+                        );
+                      })}
+
+                      {uncoveredCombinationBlockers.map((b, idx) => {
+                        const copyKey = `uc-${idx}`;
+                        const copyText = [
+                          b.detail,
+                          'Contributing decisions for this combination:',
+                          ...capabilityEstablishingQuestions.map(
+                            ({ state: qs, authored, label }) =>
+                              `- ${authored?.text ?? qs.id}: ${label ?? 'Unanswered'}`,
+                          ),
+                        ].join('\n');
+
+                        return (
+                          <View key={copyKey} style={styles.blockerCard}>
+                            <Text selectable style={styles.blockerTitle}>
+                              {b.detail}
+                            </Text>
+                            <Text selectable style={styles.blockerDetail}>
+                              Contributing decisions for this combination:
+                            </Text>
+                            {capabilityEstablishingQuestions.map(({ state: qs, authored, label }) => (
+                              <View key={qs.id} style={styles.combinationQuestionRow}>
+                                <Text selectable style={styles.investigationQuestionText}>
+                                  {authored?.text ?? qs.id}
+                                </Text>
+                                <Text selectable style={styles.investigationAnswerText}>
+                                  {label}
+                                </Text>
+                                <Pressable
+                                  onPress={() => setInvestigatingQuestionId(qs.id)}
+                                  hitSlop={6}
+                                >
+                                  <Text style={styles.investigationActionLink}>
+                                    Tap to re-examine first-version scope →
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            ))}
+                            <View style={styles.boundaryActionRow}>
+                              <Pressable
+                                onPress={() => handleCopyBoundaryExplanation(copyKey, copyText)}
+                                hitSlop={8}
+                                style={styles.boundaryCopyBtn}
+                              >
+                                <Text style={styles.boundaryCopyText}>
+                                  {copiedBoundaryKey === copyKey
+                                    ? '✓ Copied to clipboard'
+                                    : 'Copy explanation'}
+                                </Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        );
+                      })}
                     </View>
                   )}
 
@@ -703,34 +860,90 @@ export default function EmberSessionScreen({
                   </Pressable>
                 </View>
               ) : !inquiryState.designPack.adoptionValid ? (
-                <View style={styles.adoptionSection}>
-                  <Text style={styles.finishTitle}>Adopt Architecture Configuration</Text>
-                  <Text style={styles.finishHint}>
-                    The following authored configurations satisfy your requirements:
-                  </Text>
-                  {candidateConfigs.map((cfg) => (
+                inquiryState.designPack.canAdopt &&
+                awaitingAdoptionRecognition &&
+                !adoptionRecognized ? (
+                  /* Deliberate Recognition Moment when Investigation makes a configuration available */
+                  <View style={styles.recognitionSection}>
+                    <Text style={styles.recognitionBadge}>CONFIGURATION AVAILABLE</Text>
+                    <Text style={styles.finishTitle}>Architecture Coverage Reached</Text>
+                    <Text style={styles.finishBody}>
+                      Your investigation resolved the open blockers.{' '}
+                      {candidateConfigs.length === 1
+                        ? '1 authored architecture configuration now satisfies your recorded requirements.'
+                        : `${candidateConfigs.length} authored architecture configurations now satisfy your recorded requirements.`}
+                    </Text>
+
+                    <View style={styles.recognitionCard}>
+                      <Text style={styles.recognitionCardLabel}>
+                        QUALIFYING CONFIGURATION{candidateConfigs.length !== 1 ? 'S' : ''}
+                      </Text>
+                      {candidateConfigs.map((cfg) => (
+                        <View key={cfg.id} style={styles.recognitionConfigRow}>
+                          <Text style={styles.configName}>{cfg.name}</Text>
+                          <Text style={styles.configSummary}>{cfg.summary}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    <Text style={styles.finishHint}>
+                      Choose whether to proceed to configuration adoption or continue investigating your recorded scope first.
+                    </Text>
+
                     <Pressable
-                      key={cfg.id}
-                      onPress={() => handleAdoptConfig(cfg.id)}
-                      style={styles.configCard}
+                      onPress={() => setAdoptionRecognized(true)}
+                      style={styles.primaryButton}
                     >
-                      <Text style={styles.configName}>{cfg.name}</Text>
-                      <Text style={styles.configSummary}>{cfg.summary}</Text>
-                      <Text style={styles.configAdoptAction}>Tap to adopt</Text>
+                      <Text style={styles.primaryButtonText}>
+                        Proceed to Configuration Adoption
+                      </Text>
                     </Pressable>
-                  ))}
 
-                  <Pressable
-                    onPress={() => setIsInvestigating(true)}
-                    style={[styles.secondaryButton, { marginTop: SPACING.md }]}
-                  >
-                    <Text style={styles.secondaryButtonText}>Investigate Further</Text>
-                  </Pressable>
+                    <Pressable
+                      onPress={() => setIsInvestigating(true)}
+                      style={[styles.secondaryButton, { marginTop: SPACING.sm }]}
+                    >
+                      <Text style={styles.secondaryButtonText}>Continue Investigating</Text>
+                    </Pressable>
 
-                  <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
-                    <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
-                  </Pressable>
-                </View>
+                    <Pressable onPress={returnToEmber} style={styles.tertiaryButton}>
+                      <Text style={styles.tertiaryButtonText}>Pause & Return to Ember</Text>
+                    </Pressable>
+
+                    <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                      <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <View style={styles.adoptionSection}>
+                    <Text style={styles.finishTitle}>Adopt Architecture Configuration</Text>
+                    <Text style={styles.finishHint}>
+                      The following authored configurations satisfy your requirements:
+                    </Text>
+                    {candidateConfigs.map((cfg) => (
+                      <Pressable
+                        key={cfg.id}
+                        onPress={() => handleAdoptConfig(cfg.id)}
+                        style={styles.configCard}
+                      >
+                        <Text style={styles.configName}>{cfg.name}</Text>
+                        <Text style={styles.configSummary}>{cfg.summary}</Text>
+                        <Text style={styles.configAdoptAction}>Tap to adopt</Text>
+                      </Pressable>
+                    ))}
+
+                    <Pressable
+                      onPress={() => setIsInvestigating(true)}
+                      style={[styles.secondaryButton, { marginTop: SPACING.md }]}
+                    >
+                      <Text style={styles.secondaryButtonText}>Investigate Further</Text>
+                    </Pressable>
+
+                    <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                      <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                    </Pressable>
+                  </View>
+                )
               ) : !inquiryState.designPack.reviewCurrent ? (
                 <View style={styles.reviewSection}>
                   <Text style={styles.finishTitle}>Confirm Design Scope</Text>
@@ -917,7 +1130,7 @@ export default function EmberSessionScreen({
                         Blockers
                       </Text>
                       {inquiryState.designPack.blockers.map((b, idx) => (
-                        <Text key={idx} style={styles.movementConflict}>
+                        <Text key={idx} selectable style={styles.movementConflict}>
                           ⚠ {b.detail}
                         </Text>
                       ))}
@@ -1315,11 +1528,29 @@ const styles = StyleSheet.create({
     color: '#F5A623',
     textAlign: 'center',
   },
-  boundaryReexamineBtn: {
+  boundaryActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
     marginTop: 6,
-    paddingTop: 6,
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  boundaryCopyBtn: {
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 166, 35, 0.35)',
+    backgroundColor: 'rgba(245, 166, 35, 0.08)',
+  },
+  boundaryCopyText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#F5A623',
   },
   combinationQuestionRow: {
     marginTop: 6,
@@ -1348,6 +1579,45 @@ const styles = StyleSheet.create({
     fontSize: TYPOGRAPHY.sizes.xs,
     color: COLORS.textSecondary,
     lineHeight: 16,
+  },
+
+  // Configuration Available Recognition Moment
+  recognitionSection: {
+    width: '100%',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  recognitionBadge: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 107, 43, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+  },
+  recognitionCard: {
+    width: '100%',
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.22)',
+    padding: SPACING.md,
+    gap: SPACING.sm,
+    marginVertical: SPACING.xs,
+  },
+  recognitionCardLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+  },
+  recognitionConfigRow: {
+    gap: 2,
   },
 
   // Config adoption cards

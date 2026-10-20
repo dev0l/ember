@@ -150,6 +150,28 @@ export function TerritoryStage() {
     [],
   );
 
+  const handleSessionInvestigationChange = useCallback(
+    (isInvestigating: boolean) => {
+      setStackState((prev) => {
+        if (!prev.activeSession) return prev;
+        const nextTitle = isInvestigating
+          ? 'Investigating'
+          : prev.activeSession.movement === 'explore'
+          ? 'Exploring'
+          : 'Developing';
+        if (prev.activeSession.title === nextTitle) return prev;
+        return {
+          ...prev,
+          activeSession: {
+            ...prev.activeSession,
+            title: nextTitle,
+          },
+        };
+      });
+    },
+    [],
+  );
+
   const handleCloseSession = useCallback(() => {
     rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
     rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
@@ -350,10 +372,10 @@ export function TerritoryStage() {
     }
   } else if (mode === 'sparks') {
     if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
-      topRole =
-        stackState.activeSession.movement === 'explore'
-          ? '• Embers | RETURN · EXPLORING'
-          : '• Embers | RETURN · DEVELOPING';
+      const sessionTitle =
+        stackState.activeSession.title ||
+        (stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing');
+      topRole = `• Embers | RETURN · ${sessionTitle.toUpperCase()}`;
     } else if (stackState.selectedEmber) {
       topRole = `RETURN · ${stackState.selectedEmber.title}`;
     } else {
@@ -372,9 +394,10 @@ export function TerritoryStage() {
   let footerHint = 'Draw the plates apart. Their edges stay.';
   if (mode === 'sparks') {
     if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
-      footerHint = `Sparks open. ${
-        stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing'
-      } session held in Embers lineage.`;
+      const sessionTitle =
+        stackState.activeSession.title ||
+        (stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing');
+      footerHint = `Sparks open. ${sessionTitle} session held in Embers lineage.`;
     } else if (stackState.selectedEmber) {
       footerHint = `Sparks open. Embers held with ${stackState.selectedEmber.title}.`;
     } else {
@@ -383,14 +406,19 @@ export function TerritoryStage() {
   } else if (mode === 'embers') {
     if (stackState.selectedEmber) {
       if (stackState.embersFocus === 'developing') {
-        footerHint = `${stackState.selectedEmber.title} · ${
-          stackState.activeSession?.movement === 'explore' ? 'Explore' : 'Develop'
-        } open. Embers held above.`;
+        const activeSessionLabel =
+          stackState.activeSession?.title === 'Investigating'
+            ? 'Investigating'
+            : stackState.activeSession?.movement === 'explore'
+            ? 'Explore'
+            : 'Develop';
+        footerHint = `${stackState.selectedEmber.title} · ${activeSessionLabel} open. Embers held above.`;
       } else if (stackState.embersFocus === 'ember') {
+        const heldSessionLabel =
+          stackState.activeSession?.title ||
+          (stackState.activeSession?.movement === 'explore' ? 'Exploring' : 'Developing');
         footerHint = stackState.activeSession
-          ? `${stackState.selectedEmber.title} open. ${
-              stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing'
-            } held below.`
+          ? `${stackState.selectedEmber.title} open. ${heldSessionLabel} held below.`
           : `${stackState.selectedEmber.title} open. Embers collection held above.`;
       } else {
         footerHint = `Embers collection open. ${stackState.selectedEmber.title} held below.`;
@@ -551,9 +579,10 @@ export function TerritoryStage() {
                   >
                     <PlateRail
                       title={
-                        stackState.activeSession.movement === 'explore'
+                        stackState.activeSession.title ||
+                        (stackState.activeSession.movement === 'explore'
                           ? 'Exploring'
-                          : 'Developing'
+                          : 'Developing')
                       }
                       subtitle={stackState.activeSession.movement.toUpperCase()}
                       role={stackState.embersFocus === 'developing' ? 'HERE ◆' : 'OPEN ↓'}
@@ -586,6 +615,7 @@ export function TerritoryStage() {
                       hideHeader={true}
                       onBack={focusEmber}
                       onMovementChange={handleSessionMovementChange}
+                      onInvestigationStateChange={handleSessionInvestigationChange}
                       onCloseSession={handleCloseSession}
                     />
                   </Animated.View>
