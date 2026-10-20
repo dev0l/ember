@@ -52,6 +52,8 @@ export interface EmberViewScreenProps {
   emberId?: string;
   hideHeader?: boolean;
   onBack?: () => void;
+  onEdit?: () => void;
+  onRemoved?: () => void;
   onOpenSession?: (inquiryId: string, movement: 'explore' | 'develop') => void;
   onCloseSession?: () => void;
   isFocused?: boolean;
@@ -61,6 +63,8 @@ export default function EmberViewScreen({
   emberId: propEmberId,
   hideHeader = false,
   onBack,
+  onEdit,
+  onRemoved,
   onOpenSession,
   onCloseSession,
   isFocused = true,
@@ -135,10 +139,14 @@ export default function EmberViewScreen({
   }, [onBack]);
 
   const handleEdit = useCallback(() => {
+    if (onEdit) {
+      onEdit();
+      return;
+    }
     if (id) {
       router.push(`/(main)/ember/edit/${id}` as any);
     }
-  }, [id]);
+  }, [id, onEdit]);
 
   // ── Explore: deliberate entry into Explore movement ──
   const handleExplore = useCallback(() => {
@@ -265,13 +273,17 @@ export default function EmberViewScreen({
             }
             // Delete the EmberSeed
             deleteEmber(id);
+            if (onRemoved) {
+              onRemoved();
+              return;
+            }
             // Navigate away
             router.replace('/');
           },
         },
       ],
     );
-  }, [seed, id, inquiryState, designPack, participatingSparks]);
+  }, [seed, id, inquiryState, designPack, participatingSparks, onRemoved]);
 
   const Container = hideHeader ? View : SafeAreaView;
 

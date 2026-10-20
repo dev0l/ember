@@ -5,7 +5,7 @@
 // from device storage.
 // ─────────────────────────────────────────────
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { View, Text, StyleSheet, FlatList, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, router } from 'expo-router';
@@ -20,27 +20,37 @@ import { listProjects } from '@/services/ember-project-storage';
 export interface CollectionsScreenProps {
   hideHeader?: boolean;
   onSelectEmber?: (id: string, ember?: EmberSeed) => void;
+  onCreateEmber?: () => void;
   selectedEmberId?: string | null;
+  isFocused?: boolean;
 }
 
 export default function CollectionsScreen({
   hideHeader = false,
   onSelectEmber,
+  onCreateEmber,
   selectedEmberId = null,
+  isFocused = true,
 }: CollectionsScreenProps = {}) {
   const [tab, setTab] = useState<'seeds' | 'projects'>('seeds');
   const [embers, setEmbers] = useState<EmberSeed[]>([]);
   const [projects, setProjects] = useState<EmberProject[]>([]);
 
+  const loadData = useCallback(() => {
+    const loadedSeeds = listEmbers();
+    const loadedProjects = listProjects();
+    setEmbers(loadedSeeds);
+    setProjects(loadedProjects);
+  }, []);
+
   // Reload data every time the screen comes into focus
-  useFocusEffect(
-    useCallback(() => {
-      const loadedSeeds = listEmbers();
-      const loadedProjects = listProjects();
-      setEmbers(loadedSeeds);
-      setProjects(loadedProjects);
-    }, []),
-  );
+  useFocusEffect(loadData);
+
+  useEffect(() => {
+    if (isFocused) {
+      loadData();
+    }
+  }, [isFocused, selectedEmberId, loadData]);
 
   // Legacy = Inquiries with no Ember (seedless). Seed-linked Inquiries are
   // reached through their Ember, so the Legacy tab lists only these.
@@ -107,8 +117,12 @@ export default function CollectionsScreen({
   }, []);
 
   const handleCreate = useCallback(() => {
+    if (onCreateEmber) {
+      onCreateEmber();
+      return;
+    }
     router.push('/(main)/create' as any);
-  }, []);
+  }, [onCreateEmber]);
 
   const handleSparks = useCallback(() => {
     router.push('/(main)/sparks' as any);

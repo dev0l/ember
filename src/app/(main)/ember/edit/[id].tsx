@@ -7,7 +7,7 @@
 // and saves changes back to the Markdown file.
 // ─────────────────────────────────────────────
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -29,8 +30,23 @@ import {
 } from '@/core';
 import { loadEmber, saveEmber } from '@/services/ember-storage';
 
-export default function EditEmberScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export interface EditEmberScreenProps {
+  emberId?: string;
+  hideHeader?: boolean;
+  onSaved?: (updated: EmberSeed) => void;
+  onCancel?: () => void;
+  onDirtyChange?: (isDirty: boolean) => void;
+}
+
+export default function EditEmberScreen({
+  emberId: propEmberId,
+  hideHeader = false,
+  onSaved,
+  onCancel,
+  onDirtyChange,
+}: EditEmberScreenProps = {}) {
+  const params = useLocalSearchParams<{ id: string }>();
+  const id = propEmberId || params.id;
 
   const [seed, setSeed] = useState<EmberSeed | null>(null);
   const [nature, setNature] = useState<EmberNature>('open');
@@ -53,6 +69,31 @@ export default function EditEmberScreen() {
     }
   }, [id]);
 
+  // Dirty-state detection comparing form fields against the loaded EmberSeed
+  const isDirty = useMemo(() => {
+    if (!seed) return false;
+    const normalizedQuestions = questionsText
+      .split('\n')
+      .map((q) => q.trim())
+      .filter((q) => q.length > 0)
+      .join('\n');
+    const originalQuestions = seed.questions
+      .map((q) => q.trim())
+      .filter((q) => q.length > 0)
+      .join('\n');
+
+    return (
+      name.trim() !== (seed.name || '').trim() ||
+      spark.trim() !== (seed.spark || '').trim() ||
+      normalizedQuestions !== originalQuestions ||
+      carriedSentence.trim() !== (seed.carriedSentence || '').trim()
+    );
+  }, [seed, name, spark, questionsText, carriedSentence]);
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
   const handleSave = useCallback(() => {
     if (!seed) return;
 
@@ -72,37 +113,90 @@ export default function EditEmberScreen() {
       };
 
       saveEmber(updated);
+      onDirtyChange?.(false);
 
       if (__DEV__) {
         console.log(`🔥 [Ember] Updated: ${seed.id}`);
       }
 
-      // Go back to the ember view
-      router.back();
+      if (onSaved) {
+        onSaved(updated);
+        return;
+      }
+
+      // Fallback when opened as standalone route: go back to the ember view
+      if (router.canGoBack()) {
+        router.back();
+      } else {
+        router.replace({
+          pathname: '/',
+          params: { openEmberId: seed.id },
+        } as any);
+      }
     } catch (error) {
       Alert.alert('Something went wrong', 'Could not save changes.');
       if (__DEV__) {
         console.error('🔥 [Ember] Edit save error:', error);
       }
     }
-  }, [seed, nature, name, spark, questionsText, carriedSentence]);
+  }, [seed, nature, name, spark, questionsText, carriedSentence, onSaved, onDirtyChange]);
+
+  const discardAndExit = useCallback(() => {
+    onDirtyChange?.(false);
+    if (onCancel) {
+      onCancel();
+      return;
+    }
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/');
+    }
+  }, [onCancel, onDirtyChange]);
 
   const handleCancel = useCallback(() => {
-    router.back();
-  }, []);
+    if (!isDirty) {
+      discardAndExit();
+      return;
+    }
+    Alert.alert(
+      'Discard Unsaved Changes?',
+      'You have unsaved edits to this Ember. Discard your changes and return?',
+      [
+        { text: 'Keep Editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: discardAndExit,
+        },
+      ],
+    );
+  }, [isDirty, discardAndExit]);
+
+  // Standalone Android hardware Back guard (when embedded, TerritoryStage handles BackHandler)
+  useEffect(() => {
+    if (hideHeader) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleCancel();
+      return true;
+    });
+    return () => sub.remove();
+  }, [hideHeader, handleCancel]);
+
+  const Container = hideHeader ? View : SafeAreaView;
 
   if (!seed) {
     return (
-      <SafeAreaView style={styles.container}>
+      <Container style={styles.container}>
         <View style={styles.centerContainer}>
           <Text style={styles.errorText}>Ember not found</Text>
         </View>
-      </SafeAreaView>
+      </Container>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       {/* ── Header ── */}
       <View style={styles.headerBar}>
         <Pressable onPress={handleCancel} hitSlop={12}>
@@ -191,7 +285,7 @@ export default function EditEmberScreen() {
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Container>
   );
 }
 

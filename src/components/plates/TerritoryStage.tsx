@@ -6,6 +6,7 @@ import {
   Pressable,
   BackHandler,
   LayoutChangeEvent,
+  Alert,
 } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -14,6 +15,7 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLocalSearchParams } from 'expo-router';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 
 import { StageMode, TerritoryStackState, EmberPlateData, DevelopingPlateData } from './types';
@@ -21,16 +23,26 @@ import { PlateRail, RAIL_HEIGHT } from './PlateRail';
 import { PlateCover } from './PlateCover';
 import CollectionsScreen from '@/app/(main)/collections';
 import SparksScreen from '@/app/(main)/sparks';
+import CreateEmberScreen from '@/app/(main)/create';
 import EmberViewScreen from '@/app/(main)/ember/[id]';
+import EditEmberScreen from '@/app/(main)/ember/edit/[id]';
 import EmberSessionScreen from '@/app/(main)/ember-session/[id]';
+import { loadEmber } from '@/services/ember-storage';
 import type { EmberSeed } from '@/core';
 
 const ANIM_DURATION = 550;
 const ANIM_EASING = Easing.bezier(0.32, 0.04, 0.18, 1);
 
 export function TerritoryStage() {
+  const params = useLocalSearchParams<{ openEmberId?: string }>();
   const [mode, setMode] = useState<StageMode>('split');
   const [stageHeight, setStageHeight] = useState<number>(0);
+
+  // In-stage Create / Edit surface states and dirty guards
+  const [isCreatingEmber, setIsCreatingEmber] = useState(false);
+  const [isCreateDirty, setIsCreateDirty] = useState(false);
+  const [isEditingEmber, setIsEditingEmber] = useState(false);
+  const [isEditDirty, setIsEditDirty] = useState(false);
 
   // Stacking state architecture — preserving per-territory lineages
   // Law I: Plate order represents lineage, not focus. Focus changes expansion, not order.
@@ -53,25 +65,88 @@ export function TerritoryStage() {
   const numInteriorRails = hasSession ? 2 : 1;
   const availableSurfaceHeight = Math.max(0, interiorHeight - numInteriorRails * RAIL_HEIGHT);
 
-  // ── Mode Transitions ──
+  // ── Guard Unsaved Create / Edit Work ──
+  const guardUnsavedWork = useCallback(
+    (onProceed: () => void) => {
+      if (mode === 'embers' && stackState.embersFocus === 'collection' && isCreatingEmber) {
+        if (isCreateDirty) {
+          Alert.alert(
+            'Discard Unsaved Ember?',
+            'You have unsaved thoughts in this new Ember. Discard them and leave?',
+            [
+              { text: 'Keep Editing', style: 'cancel' },
+              {
+                text: 'Discard',
+                style: 'destructive',
+                onPress: () => {
+                  setIsCreatingEmber(false);
+                  setIsCreateDirty(false);
+                  onProceed();
+                },
+              },
+            ],
+          );
+          return;
+        }
+        setIsCreatingEmber(false);
+        setIsCreateDirty(false);
+      }
+
+      if (mode === 'embers' && stackState.embersFocus === 'ember' && isEditingEmber) {
+        if (isEditDirty) {
+          Alert.alert(
+            'Discard Unsaved Changes?',
+            'You have unsaved edits to this Ember. Discard your changes and leave?',
+            [
+              { text: 'Keep Editing', style: 'cancel' },
+              {
+                text: 'Discard',
+                style: 'destructive',
+                onPress: () => {
+                  setIsEditingEmber(false);
+                  setIsEditDirty(false);
+                  onProceed();
+                },
+              },
+            ],
+          );
+          return;
+        }
+        setIsEditingEmber(false);
+        setIsEditDirty(false);
+      }
+
+      onProceed();
+    },
+    [mode, stackState.embersFocus, isCreatingEmber, isCreateDirty, isEditingEmber, isEditDirty],
+  );
+
+  // ── Mode Transitions (Shared values written outside setState updaters to avoid render-phase writes) ──
   const openEmbers = useCallback(() => {
+    const targetFocus = stackState.selectedEmber ? stackState.lastEmbersFocus : 'collection';
+    const targetR1 =
+      stackState.selectedEmber && (targetFocus === 'ember' || targetFocus === 'developing') ? 1 : 0;
+    const targetR2 =
+      stackState.selectedEmber && stackState.activeSession && targetFocus === 'developing' ? 1 : 0;
+
     setMode('embers');
-    setStackState((prev) => {
-      const targetFocus = prev.lastEmbersFocus;
-      const targetR1 =
-        prev.selectedEmber && (targetFocus === 'ember' || targetFocus === 'developing') ? 1 : 0;
-      const targetR2 =
-        prev.selectedEmber && prev.activeSession && targetFocus === 'developing' ? 1 : 0;
-      rail1Progress.value = withTiming(targetR1, { duration: ANIM_DURATION, easing: ANIM_EASING });
-      rail2Progress.value = withTiming(targetR2, { duration: ANIM_DURATION, easing: ANIM_EASING });
-      return {
-        ...prev,
-        activeTerritory: 'embers',
-        embersFocus: prev.selectedEmber ? targetFocus : 'collection',
-      };
-    });
+    setStackState((prev) => ({
+      ...prev,
+      activeTerritory: 'embers',
+      embersFocus: prev.selectedEmber ? prev.lastEmbersFocus : 'collection',
+    }));
+
     openProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
-  }, [openProgress, rail1Progress, rail2Progress]);
+    rail1Progress.value = withTiming(targetR1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(targetR2, { duration: ANIM_DURATION, easing: ANIM_EASING });
+  }, [
+    stackState.selectedEmber,
+    stackState.lastEmbersFocus,
+    stackState.activeSession,
+    openProgress,
+    rail1Progress,
+    rail2Progress,
+  ]);
 
   const openSparks = useCallback(() => {
     setMode('sparks');
@@ -96,11 +171,16 @@ export function TerritoryStage() {
   // ── Lineage & Focus Actions ──
   const handleSelectEmber = useCallback(
     (id: string, seed?: EmberSeed) => {
+      const resolvedSeed = seed ?? loadEmber(id) ?? undefined;
       const emberData: EmberPlateData = {
         id,
-        title: seed?.name || 'Untitled Ember',
-        nature: seed?.nature,
+        title: resolvedSeed?.name || 'Untitled Ember',
+        nature: resolvedSeed?.nature,
       };
+      setIsCreatingEmber(false);
+      setIsCreateDirty(false);
+      setIsEditingEmber(false);
+      setIsEditDirty(false);
       setStackState((prev) => ({
         ...prev,
         selectedEmber: emberData,
@@ -114,6 +194,84 @@ export function TerritoryStage() {
     },
     [rail1Progress, rail2Progress],
   );
+
+  // Open an Ember directly in the Embers plate stack from Sparks (Spark New Ember / Participate in Ember)
+  const handleOpenEmberFromSparks = useCallback(
+    (id: string, seed?: EmberSeed) => {
+      const resolvedSeed = seed ?? loadEmber(id) ?? undefined;
+      const emberData: EmberPlateData = {
+        id,
+        title: resolvedSeed?.name || 'Untitled Ember',
+        nature: resolvedSeed?.nature,
+      };
+      setIsCreatingEmber(false);
+      setIsCreateDirty(false);
+      setIsEditingEmber(false);
+      setIsEditDirty(false);
+      setMode('embers');
+      setStackState((prev) => ({
+        ...prev,
+        activeTerritory: 'embers',
+        selectedEmber: emberData,
+        activeSession: prev.selectedEmber?.id === id ? prev.activeSession : null,
+        embersFocus: 'ember',
+        lastEmbersFocus: 'ember',
+      }));
+      openProgress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+      rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    },
+    [openProgress, rail1Progress, rail2Progress],
+  );
+
+  useEffect(() => {
+    if (params.openEmberId) {
+      handleOpenEmberFromSparks(params.openEmberId);
+    }
+  }, [params.openEmberId, handleOpenEmberFromSparks]);
+
+  // ── In-Stage Create & Edit Handlers ──
+  const handleStartCreateEmber = useCallback(() => {
+    setIsCreatingEmber(true);
+    setIsCreateDirty(false);
+  }, []);
+
+  const handleRequestCancelCreate = useCallback(() => {
+    guardUnsavedWork(() => {});
+  }, [guardUnsavedWork]);
+
+  const handleEmberCreated = useCallback(
+    (seed: EmberSeed) => {
+      setIsCreatingEmber(false);
+      setIsCreateDirty(false);
+      handleSelectEmber(seed.id, seed);
+    },
+    [handleSelectEmber],
+  );
+
+  const handleStartEditEmber = useCallback(() => {
+    setIsEditingEmber(true);
+    setIsEditDirty(false);
+  }, []);
+
+  const handleRequestCancelEdit = useCallback(() => {
+    guardUnsavedWork(() => {});
+  }, [guardUnsavedWork]);
+
+  const handleEmberSaved = useCallback((updated: EmberSeed) => {
+    setIsEditingEmber(false);
+    setIsEditDirty(false);
+    setStackState((prev) => ({
+      ...prev,
+      selectedEmber: prev.selectedEmber
+        ? {
+            ...prev.selectedEmber,
+            title: updated.name || 'Untitled Ember',
+            nature: updated.nature,
+          }
+        : null,
+    }));
+  }, []);
 
   const handleOpenSession = useCallback(
     (inquiryId: string, movement: 'explore' | 'develop') => {
@@ -184,6 +342,8 @@ export function TerritoryStage() {
   }, [rail1Progress, rail2Progress]);
 
   const focusCollection = useCallback(() => {
+    setIsEditingEmber(false);
+    setIsEditDirty(false);
     setStackState((prev) => ({
       ...prev,
       embersFocus: 'collection',
@@ -195,6 +355,8 @@ export function TerritoryStage() {
 
   const focusEmber = useCallback(() => {
     if (!stackState.selectedEmber) return;
+    setIsCreatingEmber(false);
+    setIsCreateDirty(false);
     setStackState((prev) => ({
       ...prev,
       embersFocus: 'ember',
@@ -206,6 +368,10 @@ export function TerritoryStage() {
 
   const focusDeveloping = useCallback(() => {
     if (!stackState.activeSession) return;
+    setIsCreatingEmber(false);
+    setIsCreateDirty(false);
+    setIsEditingEmber(false);
+    setIsEditDirty(false);
     setStackState((prev) => ({
       ...prev,
       embersFocus: 'developing',
@@ -216,6 +382,10 @@ export function TerritoryStage() {
   }, [stackState.activeSession, rail1Progress, rail2Progress]);
 
   const dismissEmber = useCallback(() => {
+    setIsCreatingEmber(false);
+    setIsCreateDirty(false);
+    setIsEditingEmber(false);
+    setIsEditDirty(false);
     rail1Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
     rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
     setStackState((prev) => ({
@@ -238,12 +408,20 @@ export function TerritoryStage() {
         return true;
       }
       if (mode === 'embers') {
+        if (stackState.embersFocus === 'collection' && isCreatingEmber) {
+          handleRequestCancelCreate();
+          return true;
+        }
         if (stackState.selectedEmber) {
           if (stackState.embersFocus === 'developing') {
             focusEmber();
             return true;
           }
           if (stackState.embersFocus === 'ember') {
+            if (isEditingEmber) {
+              handleRequestCancelEdit();
+              return true;
+            }
             focusCollection();
             return true;
           }
@@ -264,6 +442,10 @@ export function TerritoryStage() {
     mode,
     stackState.selectedEmber,
     stackState.embersFocus,
+    isCreatingEmber,
+    isEditingEmber,
+    handleRequestCancelCreate,
+    handleRequestCancelEdit,
     focusDeveloping,
     focusEmber,
     focusCollection,
@@ -276,13 +458,15 @@ export function TerritoryStage() {
     if (mode === 'split') {
       openEmbers();
     } else if (mode === 'embers') {
-      if (
+      if (stackState.embersFocus === 'collection' && isCreatingEmber) {
+        handleRequestCancelCreate();
+      } else if (
         stackState.selectedEmber &&
         (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')
       ) {
-        focusCollection();
+        guardUnsavedWork(focusCollection);
       } else {
-        returnToSplit();
+        guardUnsavedWork(returnToSplit);
       }
     } else if (mode === 'sparks') {
       openEmbers();
@@ -291,6 +475,9 @@ export function TerritoryStage() {
     mode,
     stackState.selectedEmber,
     stackState.embersFocus,
+    isCreatingEmber,
+    handleRequestCancelCreate,
+    guardUnsavedWork,
     openEmbers,
     focusCollection,
     returnToSplit,
@@ -302,9 +489,9 @@ export function TerritoryStage() {
     } else if (mode === 'sparks') {
       returnToSplit();
     } else if (mode === 'embers') {
-      openSparks();
+      guardUnsavedWork(openSparks);
     }
-  }, [mode, openSparks, returnToSplit]);
+  }, [mode, guardUnsavedWork, openSparks, returnToSplit]);
 
   const onLayoutStage = useCallback((e: LayoutChangeEvent) => {
     const { height } = e.nativeEvent.layout;
@@ -363,8 +550,9 @@ export function TerritoryStage() {
     topRole = 'OPEN ↓';
   } else if (mode === 'embers') {
     if (
-      stackState.selectedEmber &&
-      (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')
+      (stackState.selectedEmber &&
+        (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')) ||
+      (stackState.embersFocus === 'collection' && isCreatingEmber)
     ) {
       topRole = 'COLLECTION ↑';
     } else {
@@ -404,7 +592,9 @@ export function TerritoryStage() {
       footerHint = 'Sparks open. Embers held at the upper edge.';
     }
   } else if (mode === 'embers') {
-    if (stackState.selectedEmber) {
+    if (stackState.embersFocus === 'collection' && isCreatingEmber) {
+      footerHint = 'Embers · Creating new Ember. Sparks held at the lower edge.';
+    } else if (stackState.selectedEmber) {
       if (stackState.embersFocus === 'developing') {
         const activeSessionLabel =
           stackState.activeSession?.title === 'Investigating'
@@ -417,7 +607,9 @@ export function TerritoryStage() {
         const heldSessionLabel =
           stackState.activeSession?.title ||
           (stackState.activeSession?.movement === 'explore' ? 'Exploring' : 'Developing');
-        footerHint = stackState.activeSession
+        footerHint = isEditingEmber
+          ? `${stackState.selectedEmber.title} · Editing Ember. Embers held above.`
+          : stackState.activeSession
           ? `${stackState.selectedEmber.title} open. ${heldSessionLabel} held below.`
           : `${stackState.selectedEmber.title} open. Embers collection held above.`;
       } else {
@@ -438,14 +630,20 @@ export function TerritoryStage() {
         </View>
 
         <View style={styles.headerActions}>
-          {mode === 'embers' && stackState.selectedEmber && (
+          {mode === 'embers' && (stackState.selectedEmber || isCreatingEmber) && (
             <Pressable
               style={styles.headerButton}
               onPress={() => {
-                if (stackState.embersFocus === 'developing') {
+                if (stackState.embersFocus === 'collection' && isCreatingEmber) {
+                  handleRequestCancelCreate();
+                } else if (stackState.embersFocus === 'developing') {
                   focusEmber();
                 } else if (stackState.embersFocus === 'ember') {
-                  focusCollection();
+                  if (isEditingEmber) {
+                    handleRequestCancelEdit();
+                  } else {
+                    focusCollection();
+                  }
                 } else {
                   dismissEmber();
                 }
@@ -453,10 +651,14 @@ export function TerritoryStage() {
               hitSlop={8}
             >
               <Text style={styles.headerButtonText}>
-                {stackState.embersFocus === 'developing'
-                  ? `← ${stackState.selectedEmber.title}`
-                  : stackState.embersFocus === 'ember'
+                {stackState.embersFocus === 'collection' && isCreatingEmber
                   ? '← Embers'
+                  : stackState.embersFocus === 'developing' && stackState.selectedEmber
+                  ? `← ${stackState.selectedEmber.title}`
+                  : stackState.embersFocus === 'ember' && stackState.selectedEmber
+                  ? isEditingEmber
+                    ? `← ${stackState.selectedEmber.title}`
+                    : '← Embers'
                   : 'Deselect'}
               </Text>
             </Pressable>
@@ -465,7 +667,7 @@ export function TerritoryStage() {
           {mode !== 'split' && (
             <Pressable
               style={styles.headerButton}
-              onPress={returnToSplit}
+              onPress={() => guardUnsavedWork(returnToSplit)}
               hitSlop={8}
             >
               <Text style={styles.splitButtonText}>Split</Text>
@@ -490,12 +692,23 @@ export function TerritoryStage() {
           {/* ── Embers Territory Surface ── */}
           <View style={[styles.surfaceContainer, mode !== 'embers' && styles.hidden]}>
             {stackState.selectedEmber === null ? (
-              // Root view: full collections list
-              <CollectionsScreen
-                hideHeader={true}
-                onSelectEmber={handleSelectEmber}
-                selectedEmberId={null}
-              />
+              // Root view: full collections list or in-stage Create Ember
+              isCreatingEmber ? (
+                <CreateEmberScreen
+                  hideHeader={true}
+                  onCreated={handleEmberCreated}
+                  onCancel={handleRequestCancelCreate}
+                  onDirtyChange={setIsCreateDirty}
+                />
+              ) : (
+                <CollectionsScreen
+                  hideHeader={true}
+                  onSelectEmber={handleSelectEmber}
+                  onCreateEmber={handleStartCreateEmber}
+                  selectedEmberId={null}
+                  isFocused={mode === 'embers'}
+                />
+              )
             ) : (
               // Stacked lineage: CollectionsScreen -> Ember View -> Developing Session
               <View style={styles.stackedTerritory}>
@@ -508,11 +721,22 @@ export function TerritoryStage() {
                   ]}
                   pointerEvents={stackState.embersFocus === 'collection' ? 'auto' : 'none'}
                 >
-                  <CollectionsScreen
-                    hideHeader={true}
-                    onSelectEmber={handleSelectEmber}
-                    selectedEmberId={stackState.selectedEmber.id}
-                  />
+                  {isCreatingEmber ? (
+                    <CreateEmberScreen
+                      hideHeader={true}
+                      onCreated={handleEmberCreated}
+                      onCancel={handleRequestCancelCreate}
+                      onDirtyChange={setIsCreateDirty}
+                    />
+                  ) : (
+                    <CollectionsScreen
+                      hideHeader={true}
+                      onSelectEmber={handleSelectEmber}
+                      onCreateEmber={handleStartCreateEmber}
+                      selectedEmberId={stackState.selectedEmber.id}
+                      isFocused={mode === 'embers' && stackState.embersFocus === 'collection'}
+                    />
+                  )}
                 </Animated.View>
 
                 {/* 2. Ember Plate Rail (translates between y=0 and y=availableSurfaceHeight) */}
@@ -532,7 +756,9 @@ export function TerritoryStage() {
                     }
                     role={
                       stackState.embersFocus === 'ember'
-                        ? 'HERE ◆'
+                        ? isEditingEmber
+                          ? 'EDITING ◆'
+                          : 'HERE ◆'
                         : stackState.embersFocus === 'developing'
                         ? 'EMBER ↑'
                         : 'OPEN ↓'
@@ -541,15 +767,19 @@ export function TerritoryStage() {
                     position="middle"
                     onPress={() => {
                       if (stackState.embersFocus === 'ember') {
-                        focusCollection();
+                        if (isEditingEmber) {
+                          handleRequestCancelEdit();
+                        } else {
+                          focusCollection();
+                        }
                       } else {
-                        focusEmber();
+                        guardUnsavedWork(focusEmber);
                       }
                     }}
                   />
                 </Animated.View>
 
-                {/* 3. Ember View Surface (expands between Rail 1 and Rail 2) */}
+                {/* 3. Ember View / Edit Surface (expands between Rail 1 and Rail 2) */}
                 <Animated.View
                   style={[
                     styles.emberSurfaceWrapper,
@@ -558,14 +788,26 @@ export function TerritoryStage() {
                   ]}
                   pointerEvents={stackState.embersFocus === 'ember' ? 'auto' : 'none'}
                 >
-                  <EmberViewScreen
-                    emberId={stackState.selectedEmber.id}
-                    hideHeader={true}
-                    onBack={focusCollection}
-                    onOpenSession={handleOpenSession}
-                    onCloseSession={handleCloseSession}
-                    isFocused={stackState.embersFocus === 'ember'}
-                  />
+                  {isEditingEmber ? (
+                    <EditEmberScreen
+                      emberId={stackState.selectedEmber.id}
+                      hideHeader={true}
+                      onSaved={handleEmberSaved}
+                      onCancel={handleRequestCancelEdit}
+                      onDirtyChange={setIsEditDirty}
+                    />
+                  ) : (
+                    <EmberViewScreen
+                      emberId={stackState.selectedEmber.id}
+                      hideHeader={true}
+                      onBack={focusCollection}
+                      onEdit={handleStartEditEmber}
+                      onRemoved={dismissEmber}
+                      onOpenSession={handleOpenSession}
+                      onCloseSession={handleCloseSession}
+                      isFocused={stackState.embersFocus === 'ember' && !isEditingEmber}
+                    />
+                  )}
                 </Animated.View>
 
                 {/* 4. Developing Plate Rail (if session active, translates between y=48 and y=availableSurfaceHeight + 48) */}
@@ -592,7 +834,7 @@ export function TerritoryStage() {
                         if (stackState.embersFocus === 'developing') {
                           focusEmber();
                         } else {
-                          focusDeveloping();
+                          guardUnsavedWork(focusDeveloping);
                         }
                       }}
                     />
@@ -626,7 +868,11 @@ export function TerritoryStage() {
 
           {/* ── Sparks Territory Surface ── */}
           <View style={[styles.surfaceContainer, mode !== 'sparks' && styles.hidden]}>
-            <SparksScreen hideHeader={true} />
+            <SparksScreen
+              hideHeader={true}
+              isFocused={mode === 'sparks'}
+              onOpenEmber={handleOpenEmberFromSparks}
+            />
           </View>
         </Animated.View>
 

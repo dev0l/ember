@@ -8,7 +8,7 @@
 //  Ember says something more like: 'Attend to this.'"
 // ─────────────────────────────────────────────
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -35,9 +35,15 @@ import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 
 export interface SparksScreenProps {
   hideHeader?: boolean;
+  isFocused?: boolean;
+  onOpenEmber?: (emberId: string, seed?: EmberSeed) => void;
 }
 
-export default function SparksScreen({ hideHeader = false }: SparksScreenProps = {}) {
+export default function SparksScreen({
+  hideHeader = false,
+  isFocused = true,
+  onOpenEmber,
+}: SparksScreenProps = {}) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [sparks, setSparks] = useState<Spark[]>([]);
@@ -46,15 +52,25 @@ export default function SparksScreen({ hideHeader = false }: SparksScreenProps =
   const [detailSpark, setDetailSpark] = useState<Spark | null>(null);
   const [showEmberPicker, setShowEmberPicker] = useState(false);
 
+  const loadData = useCallback(() => {
+    const status =
+      sparkFilter === 'all'
+        ? undefined
+        : sparkFilter === 'lingering'
+        ? ('lingering' as const)
+        : ('ember-associated' as const);
+    setSparks(listSparks(status));
+    setSelectedIds(new Set());
+  }, [sparkFilter]);
+
   // Reload sparks on focus or filter change
-  useFocusEffect(
-    useCallback(() => {
-      const status = sparkFilter === 'all' ? undefined :
-                     sparkFilter === 'lingering' ? 'lingering' as const : 'ember-associated' as const;
-      setSparks(listSparks(status));
-      setSelectedIds(new Set());
-    }, [sparkFilter]),
-  );
+  useFocusEffect(loadData);
+
+  useEffect(() => {
+    if (isFocused) {
+      loadData();
+    }
+  }, [isFocused, loadData]);
 
   // Resolve ember names for participating sparks
   const emberNames = useMemo(() => {
@@ -135,9 +151,16 @@ export default function SparksScreen({ hideHeader = false }: SparksScreenProps =
       seed.id,
     );
 
+    loadData();
+
+    if (onOpenEmber) {
+      onOpenEmber(seed.id, seed);
+      return;
+    }
+
     // Navigate to the Ember View — encounter the Ember before Inquiry
     router.replace(`/(main)/ember/${seed.id}` as any);
-  }, [sparks, selectedIds]);
+  }, [sparks, selectedIds, loadData, onOpenEmber]);
 
   // ── Participate in Existing Ember ──
   const handleSelectEmber = useCallback((emberId: string) => {
@@ -149,8 +172,16 @@ export default function SparksScreen({ hideHeader = false }: SparksScreenProps =
       emberId,
     );
     setShowEmberPicker(false);
+    loadData();
+
+    if (onOpenEmber) {
+      const seed = loadEmber(emberId) ?? undefined;
+      onOpenEmber(emberId, seed);
+      return;
+    }
+
     router.replace(`/(main)/ember/${emberId}` as any);
-  }, [sparks, selectedIds]);
+  }, [sparks, selectedIds, loadData, onOpenEmber]);
 
   // ── Delete lingering sparks ──
   const handleDeleteSparks = useCallback(() => {

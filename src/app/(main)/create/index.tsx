@@ -16,7 +16,7 @@
 //   6. "Begin" — persist & enter
 // ─────────────────────────────────────────────
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -28,6 +28,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -37,6 +38,7 @@ import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import {
   type EmberNature,
   type EmberSource,
+  type EmberSeed,
   createEmberSeed,
 } from '@/core';
 import { saveEmber } from '@/services/ember-storage';
@@ -63,15 +65,42 @@ function SourceChip({ source, onRemove }: SourceChipProps) {
 
 // ── Create Screen ───────────────────────────
 
-export default function CreateEmberScreen() {
+export interface CreateEmberScreenProps {
+  hideHeader?: boolean;
+  onCreated?: (seed: EmberSeed) => void;
+  onCancel?: () => void;
+  onDirtyChange?: (isDirty: boolean) => void;
+}
+
+export default function CreateEmberScreen({
+  hideHeader = false,
+  onCreated,
+  onCancel,
+  onDirtyChange,
+}: CreateEmberScreenProps = {}) {
   // Form state
-  const [nature, setNature] = useState<EmberNature>('open');
+  const [nature] = useState<EmberNature>('open');
   const [name, setName] = useState('');
   const [spark, setSpark] = useState('');
   const [questionsText, setQuestionsText] = useState('');
   const [carriedSentence, setCarriedSentence] = useState('');
   const [sources, setSources] = useState<EmberSource[]>([]);
   const [isSaving, setIsSaving] = useState(false);
+
+  // Dirty-state detection for unsaved meaningful input
+  const isDirty = useMemo(() => {
+    return (
+      name.trim().length > 0 ||
+      spark.trim().length > 0 ||
+      questionsText.trim().length > 0 ||
+      carriedSentence.trim().length > 0 ||
+      sources.length > 0
+    );
+  }, [name, spark, questionsText, carriedSentence, sources.length]);
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
 
   // ── Pick a file reference ──
   const handlePickFile = useCallback(async () => {
@@ -128,8 +157,18 @@ export default function CreateEmberScreen() {
         console.log(`🔥 [Ember] Created: ${seed.id} (${seed.nature})`);
       }
 
-      // Navigate to the Ember view
-      router.replace(`/(main)/ember/${seed.id}` as any);
+      onDirtyChange?.(false);
+
+      if (onCreated) {
+        onCreated(seed);
+        return;
+      }
+
+      // Fallback when opened via standalone route: return to TerritoryStage with the new Ember selected
+      router.replace({
+        pathname: '/',
+        params: { openEmberId: seed.id },
+      } as any);
     } catch (error) {
       Alert.alert('Something went wrong', 'Could not create the Ember.');
       if (__DEV__) {
@@ -138,19 +177,56 @@ export default function CreateEmberScreen() {
     } finally {
       setIsSaving(false);
     }
-  }, [nature, name, spark, questionsText, carriedSentence, sources]);
+  }, [nature, name, spark, questionsText, carriedSentence, sources, onCreated, onDirtyChange]);
 
-  // ── Go back ──
-  const handleBack = useCallback(() => {
+  // ── Discard & exit ──
+  const discardAndExit = useCallback(() => {
+    onDirtyChange?.(false);
+    if (onCancel) {
+      onCancel();
+      return;
+    }
     if (router.canGoBack()) {
       router.back();
     } else {
       router.replace('/');
     }
-  }, []);
+  }, [onCancel, onDirtyChange]);
+
+  // ── Guarded Go back / Cancel ──
+  const handleBack = useCallback(() => {
+    if (!isDirty) {
+      discardAndExit();
+      return;
+    }
+    Alert.alert(
+      'Discard Unsaved Ember?',
+      'You have unsaved thoughts in this new Ember. Discard them and return?',
+      [
+        { text: 'Keep Editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: discardAndExit,
+        },
+      ],
+    );
+  }, [isDirty, discardAndExit]);
+
+  // Standalone Android hardware Back guard (when embedded, TerritoryStage handles BackHandler)
+  useEffect(() => {
+    if (hideHeader) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleBack();
+      return true;
+    });
+    return () => sub.remove();
+  }, [hideHeader, handleBack]);
+
+  const Container = hideHeader ? View : SafeAreaView;
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Container style={styles.container}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
@@ -162,8 +238,10 @@ export default function CreateEmberScreen() {
           showsVerticalScrollIndicator={false}
         >
           {/* ── Header ── */}
-          <Pressable onPress={handleBack} style={styles.backButton}>
-            <Text style={styles.backText}>← Back</Text>
+          <Pressable onPress={handleBack} style={styles.backButton} hitSlop={8}>
+            <Text style={styles.backText}>
+              {hideHeader ? '← Cancel' : '← Back'}
+            </Text>
           </Pressable>
 
           <View style={styles.header}>
@@ -292,7 +370,7 @@ export default function CreateEmberScreen() {
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Container>
   );
 }
 
