@@ -50,4 +50,6 @@ export {
   loadInquiryEvidence,
   ensureInquiryForEmber,
   loadInquiryRow,
+  resetUncommittedInquiry,
 } from './inquiry-storage';
+

@@ -133,6 +133,34 @@ export function TerritoryStage() {
     [rail1Progress, rail2Progress],
   );
 
+  const handleSessionMovementChange = useCallback(
+    (movement: 'explore' | 'develop') => {
+      setStackState((prev) => {
+        if (!prev.activeSession) return prev;
+        return {
+          ...prev,
+          activeSession: {
+            ...prev.activeSession,
+            movement,
+            title: movement === 'explore' ? 'Exploring' : 'Developing',
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const handleCloseSession = useCallback(() => {
+    rail1Progress.value = withTiming(1, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    rail2Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
+    setStackState((prev) => ({
+      ...prev,
+      activeSession: null,
+      embersFocus: prev.selectedEmber ? 'ember' : 'collection',
+      lastEmbersFocus: prev.selectedEmber ? 'ember' : 'collection',
+    }));
+  }, [rail1Progress, rail2Progress]);
+
   const focusCollection = useCallback(() => {
     setStackState((prev) => ({
       ...prev,
@@ -322,7 +350,10 @@ export function TerritoryStage() {
     }
   } else if (mode === 'sparks') {
     if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
-      topRole = '• Embers | RETURN · DEVELOPING';
+      topRole =
+        stackState.activeSession.movement === 'explore'
+          ? '• Embers | RETURN · EXPLORING'
+          : '• Embers | RETURN · DEVELOPING';
     } else if (stackState.selectedEmber) {
       topRole = `RETURN · ${stackState.selectedEmber.title}`;
     } else {
@@ -341,7 +372,9 @@ export function TerritoryStage() {
   let footerHint = 'Draw the plates apart. Their edges stay.';
   if (mode === 'sparks') {
     if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
-      footerHint = 'Sparks open. Developing session held in Embers lineage.';
+      footerHint = `Sparks open. ${
+        stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing'
+      } session held in Embers lineage.`;
     } else if (stackState.selectedEmber) {
       footerHint = `Sparks open. Embers held with ${stackState.selectedEmber.title}.`;
     } else {
@@ -355,7 +388,9 @@ export function TerritoryStage() {
         } open. Embers held above.`;
       } else if (stackState.embersFocus === 'ember') {
         footerHint = stackState.activeSession
-          ? `${stackState.selectedEmber.title} open. Developing held below.`
+          ? `${stackState.selectedEmber.title} open. ${
+              stackState.activeSession.movement === 'explore' ? 'Exploring' : 'Developing'
+            } held below.`
           : `${stackState.selectedEmber.title} open. Embers collection held above.`;
       } else {
         footerHint = `Embers collection open. ${stackState.selectedEmber.title} held below.`;
@@ -500,6 +535,7 @@ export function TerritoryStage() {
                     hideHeader={true}
                     onBack={focusCollection}
                     onOpenSession={handleOpenSession}
+                    onCloseSession={handleCloseSession}
                     isFocused={stackState.embersFocus === 'ember'}
                   />
                 </Animated.View>
@@ -549,6 +585,8 @@ export function TerritoryStage() {
                       initialMovement={stackState.activeSession.movement}
                       hideHeader={true}
                       onBack={focusEmber}
+                      onMovementChange={handleSessionMovementChange}
+                      onCloseSession={handleCloseSession}
                     />
                   </Animated.View>
                 )}

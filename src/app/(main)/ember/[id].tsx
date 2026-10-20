@@ -39,6 +39,7 @@ import {
   recordDecision,
 } from '@/services/inquiry-storage';
 import {
+  DEFAULT_LIBRARY,
   evaluateInquiry,
   chooseDesignPack,
   generateDesignPack,
@@ -52,6 +53,7 @@ export interface EmberViewScreenProps {
   hideHeader?: boolean;
   onBack?: () => void;
   onOpenSession?: (inquiryId: string, movement: 'explore' | 'develop') => void;
+  onCloseSession?: () => void;
   isFocused?: boolean;
 }
 
@@ -60,6 +62,7 @@ export default function EmberViewScreen({
   hideHeader = false,
   onBack,
   onOpenSession,
+  onCloseSession,
   isFocused = true,
 }: EmberViewScreenProps = {}) {
   const params = useLocalSearchParams<{ id: string }>();
@@ -185,9 +188,9 @@ export default function EmberViewScreen({
     } as any);
   }, [inquiryInfo, onOpenSession]);
 
-  // ── Generate Design Pack: available only when warranted ──
+  // ── Generate Design Pack: available only when warranted (once per Inquiry in this release) ──
   const handleGenerateFromEmber = useCallback(() => {
-    if (!inquiryInfo || !inquiryState || !seed) return;
+    if (!inquiryInfo || !inquiryState || !seed || designPack) return;
     const evidence = loadInquiryEvidence(inquiryInfo.id);
     const result = generateDesignPack(
       evidence,
@@ -204,7 +207,7 @@ export default function EmberViewScreen({
     }
 
     try {
-      const nextVersion = (designPack?.version ?? 0) + 1;
+      const nextVersion = 1;
       saveDesignPack(inquiryInfo.id, nextVersion, result.markdown, {
         provenance: 'engine',
         generator: DESIGN_PACK_GENERATOR,
@@ -215,6 +218,7 @@ export default function EmberViewScreen({
       });
 
       setDesignPack({ version: nextVersion, staleness: 'current' });
+      onCloseSession?.();
       router.push({
         pathname: '/(main)/design-pack/[id]',
         params: { id: inquiryInfo.id },
@@ -223,7 +227,7 @@ export default function EmberViewScreen({
       Alert.alert('Generation failed', 'Something went wrong saving the Design Pack.');
       if (__DEV__) console.error('🔥 [Ember] Design Pack generation error:', error);
     }
-  }, [inquiryInfo, inquiryState, seed, designPack]);
+  }, [inquiryInfo, inquiryState, seed, designPack, onCloseSession]);
 
   // ── Remove Ember ──
   // Guardian amendment: only undeveloped Embers can be removed cleanly.
@@ -370,7 +374,7 @@ export default function EmberViewScreen({
 
           {/* 1. Explore Movement */}
           {inquiryState && (
-            inquiryState.explore.missingRequired.length > 0 ? (
+            !designPack && inquiryState.explore.missingRequired.length > 0 ? (
               <Pressable onPress={handleExplore} style={styles.developButton}>
                 <Text style={styles.developButtonText}>
                   Explore
@@ -379,7 +383,7 @@ export default function EmberViewScreen({
                   Establish purpose and audience
                 </Text>
               </Pressable>
-            ) : inquiryState.explore.openOptional.length > 0 ? (
+            ) : !designPack && inquiryState.explore.openOptional.length > 0 ? (
               <Pressable onPress={handleExplore} style={styles.developButton}>
                 <Text style={styles.developButtonText}>
                   Exploring
@@ -399,7 +403,7 @@ export default function EmberViewScreen({
           )}
 
           {/* 2. Design Pack Consequence (Available & Actionable) */}
-          {inquiryState?.designPack.available && !inquiryState.designPack.chosen && (
+          {!designPack && inquiryState?.designPack.available && !inquiryState.designPack.chosen && (
             <Pressable onPress={handleChooseDesignPack} style={[styles.developButton, styles.generateButton]}>
               <Text style={styles.generateButtonText}>
                 Design Pack Available
@@ -412,33 +416,62 @@ export default function EmberViewScreen({
 
           {/* 3. Develop Movement (only once Design Pack chosen) */}
           {inquiryState?.designPack.chosen && (
-            inquiryState.designPack.developing ? (
+            !designPack && inquiryState.designPack.developing ? (
               <Pressable onPress={handleDevelop} style={styles.developButton}>
                 <Text style={styles.developButtonText}>
                   Developing
                 </Text>
                 <Text style={styles.developButtonHint}>
-                  {inquiryState.designPack.outstanding.length > 0
-                    ? `${inquiryState.designPack.outstanding.length} requirement${inquiryState.designPack.outstanding.length !== 1 ? 's' : ''} outstanding`
-                    : inquiryState.designPack.blockers.length > 0
-                    ? `${inquiryState.designPack.blockers.length} blocker${inquiryState.designPack.blockers.length !== 1 ? 's' : ''} require attention`
-                    : !inquiryState.designPack.adoptedConfigurationId
-                    ? 'Configuration adoption required'
-                    : 'Review confirmation required'}
+                  {(() => {
+                    const unresolvedCount = inquiryState.designPack.blockers.filter(
+                      (b) => b.kind === 'unresolved-decision',
+                    ).length;
+                    if (inquiryState.designPack.outstanding.length > 0) {
+                      return `${inquiryState.designPack.outstanding.length} requirement${
+                        inquiryState.designPack.outstanding.length !== 1 ? 's' : ''
+                      } outstanding`;
+                    }
+                    if (unresolvedCount > 0) {
+                      return `${unresolvedCount} open decision${
+                        unresolvedCount !== 1 ? 's' : ''
+                      } to investigate`;
+                    }
+                    if (inquiryState.designPack.blockers.length > 0) {
+                      return 'Authored coverage boundary reached · tap to inspect';
+                    }
+                    if (!inquiryState.designPack.adoptionValid) {
+                      return 'Configuration adoption required';
+                    }
+                    return 'Review confirmation required';
+                  })()}
+                </Text>
+              </Pressable>
+            ) : !designPack ? (
+              <Pressable onPress={handleDevelop} style={styles.developButton}>
+                <Text style={styles.completedText}>✓ Developed</Text>
+                <Text style={styles.developButtonHint}>
+                  Warranted for{' '}
+                  {DEFAULT_LIBRARY.configurations.find(
+                    (c) => c.id === inquiryState.designPack.adoptedConfigurationId,
+                  )?.name ?? inquiryState.designPack.adoptedConfigurationId}{' '}
+                  · tap to inspect or investigate
                 </Text>
               </Pressable>
             ) : (
               <View style={styles.completedMovement}>
                 <Text style={styles.completedText}>✓ Developed</Text>
                 <Text style={styles.completedHint}>
-                  Warranted for {inquiryState.designPack.adoptedConfigurationId}
+                  Warranted for{' '}
+                  {DEFAULT_LIBRARY.configurations.find(
+                    (c) => c.id === inquiryState.designPack.adoptedConfigurationId,
+                  )?.name ?? inquiryState.designPack.adoptedConfigurationId}
                 </Text>
               </View>
             )
           )}
 
-          {/* 4. Generate Design Pack (Warranted only) */}
-          {inquiryState?.designPack.generationAvailable && (
+          {/* 4. Generate Design Pack (Warranted & not yet generated for this release) */}
+          {!designPack && inquiryState?.designPack.generationAvailable && (
             <Pressable onPress={handleGenerateFromEmber} style={[styles.developButton, styles.generateButton]}>
               <Text style={styles.generateButtonText}>
                 Generate Design Pack
@@ -464,7 +497,7 @@ export default function EmberViewScreen({
               <Text style={styles.developButtonHint}>
                 {designPack.staleness === 'stale'
                   ? 'Evidence changed since generation · tap to view'
-                  : 'Tap to view'}
+                  : 'Inquiry complete · tap to view'}
               </Text>
             </Pressable>
           )}

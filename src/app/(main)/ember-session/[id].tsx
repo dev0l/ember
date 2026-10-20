@@ -35,22 +35,29 @@ import {
   adoptConfiguration,
   confirmReview,
   CAPABILITY_LABELS,
+  CONDITION_CAPABILITIES,
   type InquiryQuestion,
   type InquiryChoice,
   type Movement,
   type InquiryState,
+  type QuestionState,
+  type Capability,
 } from '@/inquiry';
 import {
   loadInquiryEvidence,
   saveAnswer,
   recordDecision,
+  resetUncommittedInquiry,
 } from '@/services/inquiry-storage';
+import { loadLatestDesignPack } from '@/services/ember-project-storage';
 
 export interface EmberSessionScreenProps {
   inquiryId?: string;
   initialMovement?: Movement;
   hideHeader?: boolean;
   onBack?: () => void;
+  onMovementChange?: (movement: Movement) => void;
+  onCloseSession?: () => void;
 }
 
 export default function EmberSessionScreen({
@@ -58,6 +65,8 @@ export default function EmberSessionScreen({
   initialMovement: propMovement,
   hideHeader = false,
   onBack,
+  onMovementChange,
+  onCloseSession,
 }: EmberSessionScreenProps = {}) {
   const params = useLocalSearchParams<{
     id: string;
@@ -71,15 +80,23 @@ export default function EmberSessionScreen({
   // Evidence and Engine State
   const [evidence, setEvidence] = useState(() => (inquiryId ? loadInquiryEvidence(inquiryId) : { answers: [], decisions: [] }));
 
+  // Guided Investigation state (targeted question resolution & user-chosen investigation)
+  const [investigatingQuestionId, setInvestigatingQuestionId] = useState<string | null>(null);
+  const [isInvestigating, setIsInvestigating] = useState(false);
+
   useEffect(() => {
     if (inquiryId) {
       setEvidence(loadInquiryEvidence(inquiryId));
+      setInvestigatingQuestionId(null);
+      setIsInvestigating(false);
     }
   }, [inquiryId]);
 
   useEffect(() => {
     if (propMovement) {
       setMovement(propMovement);
+      setInvestigatingQuestionId(null);
+      setIsInvestigating(false);
     }
   }, [propMovement]);
 
@@ -87,10 +104,33 @@ export default function EmberSessionScreen({
     return evaluateInquiry(evidence, DEFAULT_LIBRARY);
   }, [evidence]);
 
-  // Current question driven by evaluator
-  const activeQuestion: InquiryQuestion | undefined = useMemo(() => {
+  // Release boundary: once the first Design Pack is generated, the Inquiry is complete for this release
+  const hasGeneratedPack = useMemo(() => {
+    if (!inquiryId) return false;
+    return loadLatestDesignPack(inquiryId) !== null;
+  }, [inquiryId, evidence]);
+
+  const questionById = useMemo(() => {
+    return new Map(DEFAULT_LIBRARY.questions.map((q) => [q.id, q]));
+  }, []);
+
+  // Forward-moving next question from evaluator, or targeted investigation question
+  const nextUnansweredQuestion: InquiryQuestion | undefined = useMemo(() => {
+    if (hasGeneratedPack) return undefined;
     return nextQuestion(inquiryState, movement, DEFAULT_LIBRARY);
-  }, [inquiryState, movement]);
+  }, [inquiryState, movement, hasGeneratedPack]);
+
+  const investigatingQuestion: InquiryQuestion | undefined = useMemo(() => {
+    if (!investigatingQuestionId || hasGeneratedPack) return undefined;
+    return questionById.get(investigatingQuestionId);
+  }, [investigatingQuestionId, questionById, hasGeneratedPack]);
+
+  const activeQuestion: InquiryQuestion | undefined = investigatingQuestion ?? nextUnansweredQuestion;
+
+  const activeQuestionState: QuestionState | undefined = useMemo(() => {
+    if (!activeQuestion) return undefined;
+    return inquiryState.questions.find((q) => q.id === activeQuestion.id);
+  }, [activeQuestion, inquiryState.questions]);
 
   // Form input state
   const [currentAnswer, setCurrentAnswer] = useState('');
@@ -159,13 +199,15 @@ export default function EmberSessionScreen({
     const nextEvidence = loadInquiryEvidence(inquiryId);
     setEvidence(nextEvidence);
 
+    // Clear targeted investigation question so any newly unlocked conditional
+    // questions flow forward via nextQuestion, or return to the threshold.
+    setInvestigatingQuestionId(null);
+    setIsInvestigating(false);
+
     // Reset inputs
     setCurrentAnswer('');
     setSelectedChoice(null);
     setSpecificationText('');
-
-    // If in Explore and purpose + audience just became established, return or stay?
-    // User can continue exploring optional questions, or return.
   }, [inquiryId, activeQuestion, selectedChoice, currentAnswer, specificationText]);
 
   // Adopt configuration act
@@ -188,16 +230,45 @@ export default function EmberSessionScreen({
     }
   }, [inquiryId, inquiryState, returnToEmber]);
 
-  // Actionable crossing from Movement Available modal: choose Design Pack
+  // Actionable crossing from Explore endpoint or Movement Available modal: choose Design Pack
   const handleModalChooseDesignPack = useCallback(() => {
     const decision = chooseDesignPack(inquiryState, new Date().toISOString());
     if (decision) {
       recordDecision(inquiryId, decision);
       setEvidence(loadInquiryEvidence(inquiryId));
       setShowMovements(false);
+      setInvestigatingQuestionId(null);
+      setIsInvestigating(false);
       setMovement('develop');
+      onMovementChange?.('develop');
     }
-  }, [inquiryId, inquiryState]);
+  }, [inquiryId, inquiryState, onMovementChange]);
+
+  // Decline & Reset Inquiry (available before first Design Pack generation)
+  const handleDeclineAndReset = useCallback(() => {
+    if (!inquiryId || hasGeneratedPack) return;
+    Alert.alert(
+      'Decline & Reset Inquiry',
+      'Discard all recorded answers and decisions in this Inquiry? The Ember itself will remain untouched, and you can start a fresh Inquiry from the beginning.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Discard & Reset',
+          style: 'destructive',
+          onPress: () => {
+            const ok = resetUncommittedInquiry(inquiryId);
+            if (ok) {
+              if (onCloseSession) {
+                onCloseSession();
+              } else {
+                returnToEmber();
+              }
+            }
+          },
+        },
+      ],
+    );
+  }, [inquiryId, hasGeneratedPack, onCloseSession, returnToEmber]);
 
   // Selected choice object for rendering specification input
   const activeChoiceObj: InquiryChoice | undefined = useMemo(() => {
@@ -211,6 +282,82 @@ export default function EmberSessionScreen({
       inquiryState.designPack.candidates.includes(c.id),
     );
   }, [inquiryState.designPack.candidates]);
+
+  const adoptedConfigObj = useMemo(() => {
+    if (!inquiryState.designPack.adoptedConfigurationId) return undefined;
+    return DEFAULT_LIBRARY.configurations.find(
+      (c) => c.id === inquiryState.designPack.adoptedConfigurationId,
+    );
+  }, [inquiryState.designPack.adoptedConfigurationId]);
+
+  // Recorded Explore context & uncertainty for Investigation and Review views
+  const recordedPurpose = useMemo(() => {
+    const q = inquiryState.questions.find((qs) => qs.id === 'q-purpose');
+    return q?.disposition === 'context' ? q.answer?.value.trim() : undefined;
+  }, [inquiryState.questions]);
+
+  const recordedAudience = useMemo(() => {
+    const q = inquiryState.questions.find((qs) => qs.id === 'q-audience');
+    return q?.disposition === 'context' ? q.answer?.value.trim() : undefined;
+  }, [inquiryState.questions]);
+
+  const recordedUncertainty = useMemo(() => {
+    const q = inquiryState.questions.find((qs) => qs.id === 'q-uncertainty');
+    return q?.disposition === 'context' ? q.answer?.value.trim() : undefined;
+  }, [inquiryState.questions]);
+
+  // Blocker classification & originating-question traceability
+  const unresolvedBlockers = useMemo(() => {
+    return inquiryState.designPack.blockers.filter((b) => b.kind === 'unresolved-decision');
+  }, [inquiryState.designPack.blockers]);
+
+  const knowledgeBoundaryBlockers = useMemo(() => {
+    return inquiryState.designPack.blockers
+      .filter((b) => b.kind === 'knowledge-boundary')
+      .map((b) => {
+        const cap = b.subject as Capability;
+        const sourceConditions = Object.keys(CONDITION_CAPABILITIES).filter(
+          (c) => CONDITION_CAPABILITIES[c] === cap && inquiryState.conditions.includes(c),
+        );
+        const sourceQState = inquiryState.questions.find(
+          (q) => q.applicable && q.established.some((c) => sourceConditions.includes(c)),
+        );
+        const sourceQuestion = sourceQState ? questionById.get(sourceQState.id) : undefined;
+        const answerLabel =
+          sourceQuestion && sourceQState?.answer
+            ? sourceQuestion.choices?.find((c) => c.value === sourceQState.answer?.value)?.label ??
+              sourceQState.answer.value
+            : undefined;
+        return {
+          blocker: b,
+          sourceQuestion,
+          sourceQState,
+          answerLabel,
+        };
+      });
+  }, [inquiryState.designPack.blockers, inquiryState.conditions, inquiryState.questions, questionById]);
+
+  const uncoveredCombinationBlockers = useMemo(() => {
+    return inquiryState.designPack.blockers.filter((b) => b.kind === 'uncovered-combination');
+  }, [inquiryState.designPack.blockers]);
+
+  const capabilityEstablishingQuestions = useMemo(() => {
+    return inquiryState.questions
+      .filter(
+        (q) =>
+          q.movement === 'develop' &&
+          q.applicable &&
+          q.established.some((c) => Boolean(CONDITION_CAPABILITIES[c])),
+      )
+      .map((q) => {
+        const authored = questionById.get(q.id);
+        const label =
+          authored && q.answer
+            ? authored.choices?.find((c) => c.value === q.answer?.value)?.label ?? q.answer.value
+            : undefined;
+        return { state: q, authored, label };
+      });
+  }, [inquiryState.questions, questionById]);
 
   const Container = hideHeader ? View : SafeAreaView;
 
@@ -244,15 +391,25 @@ export default function EmberSessionScreen({
               {/* Progress indicator */}
               <View style={styles.progressRow}>
                 <Text style={styles.progressText}>
-                  {movement === 'explore'
+                  {investigatingQuestion
+                    ? activeQuestionState?.disposition === 'unresolved'
+                      ? 'Investigating · Open Decision'
+                      : 'Investigating · Re-examining Scope'
+                    : movement === 'explore'
                     ? activeQuestion.role === 'required'
                       ? 'Explore · Foundation'
                       : 'Explore · Optional'
                     : 'Develop · Requirement'}
                 </Text>
-                <Text style={styles.progressCount}>
-                  {activeQuestion.role === 'optional' ? 'Optional' : 'Required'}
-                </Text>
+                {investigatingQuestion ? (
+                  <Pressable onPress={() => setInvestigatingQuestionId(null)} hitSlop={8}>
+                    <Text style={styles.cancelInvestigateText}>← Back to Threshold</Text>
+                  </Pressable>
+                ) : (
+                  <Text style={styles.progressCount}>
+                    {activeQuestion.role === 'optional' ? 'Optional' : 'Required'}
+                  </Text>
+                )}
               </View>
 
               {/* Question text */}
@@ -332,22 +489,220 @@ export default function EmberSessionScreen({
                   )
                 }
               >
-                <Text style={styles.primaryButtonText}>Save & Continue</Text>
+                <Text style={styles.primaryButtonText}>
+                  {investigatingQuestion ? 'Save Resolution' : 'Save & Continue'}
+                </Text>
               </Pressable>
             </>
+          ) : hasGeneratedPack ? (
+            /* Completed Inquiry for this release */
+            <View style={styles.finishContainer}>
+              <Text style={styles.finishTitle}>Inquiry Complete</Text>
+              <Text style={styles.finishBody}>
+                A warranted Design Pack has been generated for this Inquiry. For this release, completed Inquiries remain preserved as recorded.
+              </Text>
+              <Pressable onPress={returnToEmber} style={styles.primaryButton}>
+                <Text style={styles.primaryButtonText}>Return to Ember</Text>
+              </Pressable>
+            </View>
+          ) : isInvestigating ? (
+            /* ── User-Chosen Guided Investigation View ── */
+            <View style={styles.investigationContainer}>
+              <Text style={styles.investigationBadge}>USER-CHOSEN INVESTIGATION</Text>
+              <Text style={styles.finishTitle}>Investigate Recorded Scope</Text>
+              <Text style={styles.finishBody}>
+                You may pause and return after researching outside Ember, or select any question below to update your recorded answer. Changing a technical requirement will re-verify configuration adoption and review.
+              </Text>
+
+              {recordedUncertainty && (
+                <View style={styles.uncertaintyCallout}>
+                  <Text style={styles.uncertaintyLabel}>RECORDED UNCERTAINTY</Text>
+                  <Text style={styles.uncertaintyText}>“{recordedUncertainty}”</Text>
+                </View>
+              )}
+
+              {/* Explore Context & Open Material */}
+              <View style={styles.investigationGroup}>
+                <Text style={styles.investigationGroupTitle}>EXPLORE · INTENT & UNCERTAINTIES</Text>
+                {inquiryState.questions
+                  .filter((q) => q.movement === 'explore' && q.applicable)
+                  .map((q) => {
+                    const authored = questionById.get(q.id);
+                    if (!authored) return null;
+                    const valueText = q.answer?.value.trim();
+                    return (
+                      <Pressable
+                        key={q.id}
+                        onPress={() => setInvestigatingQuestionId(q.id)}
+                        style={styles.investigationItemCard}
+                      >
+                        <Text style={styles.investigationQuestionText}>{authored.text}</Text>
+                        <Text style={styles.investigationAnswerText} numberOfLines={2}>
+                          {valueText ? valueText : 'Not recorded — tap to add'}
+                        </Text>
+                        <Text style={styles.investigationActionLink}>Tap to update →</Text>
+                      </Pressable>
+                    );
+                  })}
+              </View>
+
+              {/* Develop Technical Decisions */}
+              <View style={styles.investigationGroup}>
+                <Text style={styles.investigationGroupTitle}>DEVELOP · TECHNICAL REQUIREMENTS</Text>
+                {inquiryState.questions
+                  .filter((q) => q.movement === 'develop' && q.applicable)
+                  .map((q) => {
+                    const authored = questionById.get(q.id);
+                    if (!authored) return null;
+                    const choiceLabel = q.answer
+                      ? authored.choices?.find((c) => c.value === q.answer?.value)?.label ??
+                        q.answer.value
+                      : 'Unanswered';
+                    const spec = q.answer?.specification?.trim();
+                    return (
+                      <Pressable
+                        key={q.id}
+                        onPress={() => setInvestigatingQuestionId(q.id)}
+                        style={styles.investigationItemCard}
+                      >
+                        <Text style={styles.investigationQuestionText}>{authored.text}</Text>
+                        <Text style={styles.investigationAnswerText}>
+                          {choiceLabel}
+                          {spec ? ` (${spec})` : ''}
+                        </Text>
+                        <Text style={styles.investigationActionLink}>Tap to re-examine →</Text>
+                      </Pressable>
+                    );
+                  })}
+              </View>
+
+              <Pressable
+                onPress={() => setIsInvestigating(false)}
+                style={styles.primaryButton}
+              >
+                <Text style={styles.primaryButtonText}>Done Investigating</Text>
+              </Pressable>
+
+              <Pressable onPress={returnToEmber} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>Pause & Return to Ember</Text>
+              </Pressable>
+
+              <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+              </Pressable>
+            </View>
           ) : movement === 'develop' && inquiryState.designPack.chosen ? (
-            /* Develop finished: Adoption & Review confirmation steps */
+            /* Develop finished: Investigation / Blockers, Adoption & Review confirmation thresholds */
             <View style={styles.finishContainer}>
               {inquiryState.designPack.blockers.length > 0 ? (
-                <View style={styles.blockerCard}>
-                  <Text style={styles.blockerTitle}>Active Technical Blockers</Text>
-                  {inquiryState.designPack.blockers.map((b, idx) => (
-                    <Text key={idx} style={styles.blockerDetail}>
-                      • {b.detail}
-                    </Text>
-                  ))}
+                <View style={styles.investigationContainer}>
+                  {/* 1. Engine-Required Investigation: Open Decisions ("Not sure yet") */}
+                  {unresolvedBlockers.length > 0 && (
+                    <View style={styles.investigationGroup}>
+                      <Text style={styles.investigationBadge}>ENGINE-REQUIRED INVESTIGATION</Text>
+                      <Text style={styles.finishTitle}>Open Decisions to Investigate</Text>
+                      <Text style={styles.finishBody}>
+                        These decisions were marked “Not sure yet” and would change the construction. You may pause to investigate outside Ember and return when ready, or resolve an open decision below:
+                      </Text>
+
+                      {recordedUncertainty && (
+                        <View style={styles.uncertaintyCallout}>
+                          <Text style={styles.uncertaintyLabel}>RECORDED UNCERTAINTY (EXPLORE)</Text>
+                          <Text style={styles.uncertaintyText}>“{recordedUncertainty}”</Text>
+                        </View>
+                      )}
+
+                      {unresolvedBlockers.map((b) => {
+                        const authored = questionById.get(b.subject);
+                        return (
+                          <Pressable
+                            key={b.subject}
+                            onPress={() => setInvestigatingQuestionId(b.subject)}
+                            style={styles.openDecisionCard}
+                          >
+                            <Text style={styles.openDecisionBadge}>OPEN DECISION · NOT SURE YET</Text>
+                            <Text style={styles.investigationQuestionText}>
+                              {authored?.text ?? b.subject}
+                            </Text>
+                            <Text style={styles.investigationDetailText}>{b.detail}</Text>
+                            <Text style={styles.configAdoptAction}>Tap to resolve decision →</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
+
+                  {/* 2. Honest Authored Coverage Boundaries */}
+                  {(knowledgeBoundaryBlockers.length > 0 || uncoveredCombinationBlockers.length > 0) && (
+                    <View style={styles.investigationGroup}>
+                      <Text style={styles.boundaryBadge}>AUTHORED COVERAGE BOUNDARY</Text>
+                      <Text style={styles.boundaryHeading}>Beyond Current Configuration Perimeter</Text>
+                      <Text style={styles.finishBody}>
+                        Your recorded requirements are valid, but reach beyond the self-contained local configurations authored in Ember’s current library. Do not change truthful requirements merely to satisfy the engine. Only if your intended first-version scope changes, you may re-examine the decision below:
+                      </Text>
+
+                      {knowledgeBoundaryBlockers.map(({ blocker, sourceQuestion, answerLabel }, idx) => (
+                        <View key={`kb-${idx}`} style={styles.blockerCard}>
+                          <Text style={styles.blockerTitle}>{blocker.detail}</Text>
+                          {sourceQuestion && (
+                            <Text style={styles.blockerDetail}>
+                              Question: {sourceQuestion.text}
+                            </Text>
+                          )}
+                          {answerLabel && (
+                            <Text style={styles.blockerDetail}>
+                              Recorded answer: {answerLabel}
+                              {blocker.preservedText ? ` (“${blocker.preservedText}”)` : ''}
+                            </Text>
+                          )}
+                          {sourceQuestion && (
+                            <Pressable
+                              onPress={() => setInvestigatingQuestionId(sourceQuestion.id)}
+                              style={styles.boundaryReexamineBtn}
+                            >
+                              <Text style={styles.investigationActionLink}>
+                                Re-examine first-version scope →
+                              </Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      ))}
+
+                      {uncoveredCombinationBlockers.map((b, idx) => (
+                        <View key={`uc-${idx}`} style={styles.blockerCard}>
+                          <Text style={styles.blockerTitle}>{b.detail}</Text>
+                          <Text style={styles.blockerDetail}>
+                            Contributing decisions for this combination:
+                          </Text>
+                          {capabilityEstablishingQuestions.map(({ state: qs, authored, label }) => (
+                            <Pressable
+                              key={qs.id}
+                              onPress={() => setInvestigatingQuestionId(qs.id)}
+                              style={styles.combinationQuestionRow}
+                            >
+                              <Text style={styles.investigationQuestionText}>
+                                {authored?.text ?? qs.id}
+                              </Text>
+                              <Text style={styles.investigationAnswerText}>{label}</Text>
+                              <Text style={styles.investigationActionLink}>
+                                Tap to re-examine first-version scope →
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  <Pressable onPress={returnToEmber} style={styles.secondaryButton}>
+                    <Text style={styles.secondaryButtonText}>Pause & Return to Ember</Text>
+                  </Pressable>
+
+                  <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                    <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                  </Pressable>
                 </View>
-              ) : !inquiryState.designPack.adoptedConfigurationId ? (
+              ) : !inquiryState.designPack.adoptionValid ? (
                 <View style={styles.adoptionSection}>
                   <Text style={styles.finishTitle}>Adopt Architecture Configuration</Text>
                   <Text style={styles.finishHint}>
@@ -364,31 +719,103 @@ export default function EmberSessionScreen({
                       <Text style={styles.configAdoptAction}>Tap to adopt</Text>
                     </Pressable>
                   ))}
+
+                  <Pressable
+                    onPress={() => setIsInvestigating(true)}
+                    style={[styles.secondaryButton, { marginTop: SPACING.md }]}
+                  >
+                    <Text style={styles.secondaryButtonText}>Investigate Further</Text>
+                  </Pressable>
+
+                  <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                    <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                  </Pressable>
                 </View>
               ) : !inquiryState.designPack.reviewCurrent ? (
                 <View style={styles.reviewSection}>
                   <Text style={styles.finishTitle}>Confirm Design Scope</Text>
                   <Text style={styles.finishHint}>
-                    Adopted Configuration: {inquiryState.designPack.adoptedConfigurationId}
+                    Adopted Configuration: {adoptedConfigObj?.name ?? inquiryState.designPack.adoptedConfigurationId}
                   </Text>
+
+                  {/* Concise Scope Summary for Review */}
+                  <View style={styles.scopeSummaryCard}>
+                    {recordedPurpose && (
+                      <View style={styles.scopeSummaryRow}>
+                        <Text style={styles.scopeSummaryLabel}>PURPOSE</Text>
+                        <Text style={styles.scopeSummaryValue} numberOfLines={2}>
+                          {recordedPurpose}
+                        </Text>
+                      </View>
+                    )}
+                    {recordedAudience && (
+                      <View style={styles.scopeSummaryRow}>
+                        <Text style={styles.scopeSummaryLabel}>AUDIENCE</Text>
+                        <Text style={styles.scopeSummaryValue} numberOfLines={2}>
+                          {recordedAudience}
+                        </Text>
+                      </View>
+                    )}
+                    {recordedUncertainty && (
+                      <View style={styles.scopeSummaryRow}>
+                        <Text style={styles.scopeSummaryLabel}>OPEN UNCERTAINTY</Text>
+                        <Text style={styles.scopeSummaryValue} numberOfLines={2}>
+                          {recordedUncertainty}
+                        </Text>
+                      </View>
+                    )}
+                    <Text style={styles.scopeSummaryMeta}>
+                      {inquiryState.designPack.requiredCapabilities.length} required capabilities covered ·{' '}
+                      {inquiryState.questions.filter((q) => q.movement === 'develop' && q.applicable).length} technical decisions recorded
+                    </Text>
+                  </View>
+
                   <Text style={styles.finishBody}>
-                    Confirm that recorded technical requirements accurately reflect the initial version.
+                    Confirm that the recorded purpose, audience, decisions, and open material contain no known unrepresented consequential issue for the first version.
                   </Text>
+
                   <Pressable
                     onPress={handleConfirmReview}
                     style={styles.primaryButton}
                   >
                     <Text style={styles.primaryButtonText}>Confirm Review</Text>
                   </Pressable>
+
+                  <Pressable
+                    onPress={() => setIsInvestigating(true)}
+                    style={[styles.secondaryButton, { marginTop: SPACING.sm }]}
+                  >
+                    <Text style={styles.secondaryButtonText}>Investigate Further</Text>
+                  </Pressable>
+
+                  <Pressable onPress={returnToEmber} style={styles.tertiaryButton}>
+                    <Text style={styles.tertiaryButtonText}>Pause & Return to Ember</Text>
+                  </Pressable>
+
+                  <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                    <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                  </Pressable>
                 </View>
               ) : (
                 <View style={styles.reviewSection}>
                   <Text style={styles.finishTitle}>Develop Warranted</Text>
+                  <Text style={styles.finishHint}>
+                    Adopted Configuration: {adoptedConfigObj?.name ?? inquiryState.designPack.adoptedConfigurationId}
+                  </Text>
                   <Text style={styles.finishBody}>
-                    Your technical enquiry is complete and warranted for Design Pack generation.
+                    Your technical enquiry is complete and warranted for Design Pack generation from the Ember view.
                   </Text>
                   <Pressable onPress={returnToEmber} style={styles.primaryButton}>
                     <Text style={styles.primaryButtonText}>Return to Ember</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setIsInvestigating(true)}
+                    style={[styles.secondaryButton, { marginTop: SPACING.sm }]}
+                  >
+                    <Text style={styles.secondaryButtonText}>Investigate Further</Text>
+                  </Pressable>
+                  <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                    <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
                   </Pressable>
                 </View>
               )}
@@ -416,6 +843,11 @@ export default function EmberSessionScreen({
               >
                 <Text style={styles.secondaryButtonText}>Return to Ember</Text>
               </Pressable>
+              {!hasGeneratedPack && inquiryState.questions.some((q) => q.answer !== undefined) && (
+                <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
+                  <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
+                </Pressable>
+              )}
             </View>
           )}
 
@@ -613,6 +1045,11 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: COLORS.textMuted,
   },
+  cancelInvestigateText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+  },
 
   // Question
   questionText: {
@@ -705,6 +1142,28 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.emberOrange,
   },
+  tertiaryButton: {
+    alignSelf: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    marginTop: SPACING.xs,
+  },
+  tertiaryButtonText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+  },
+  declineButton: {
+    alignSelf: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    marginTop: SPACING.sm,
+  },
+  declineButtonText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textMuted,
+    textDecorationLine: 'underline',
+  },
   buttonDisabled: {
     opacity: 0.4,
   },
@@ -732,6 +1191,142 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
     lineHeight: 20,
+  },
+
+  // Guided Investigation & Open Decisions
+  investigationContainer: {
+    width: '100%',
+    alignItems: 'center',
+    gap: SPACING.md,
+    paddingVertical: SPACING.md,
+  },
+  investigationBadge: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 107, 43, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+  },
+  uncertaintyCallout: {
+    width: '100%',
+    backgroundColor: 'rgba(255, 107, 43, 0.06)',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.18)',
+    padding: SPACING.md,
+    gap: 4,
+  },
+  uncertaintyLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+  },
+  uncertaintyText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    fontStyle: 'italic',
+    lineHeight: 18,
+  },
+  investigationGroup: {
+    width: '100%',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  investigationGroupTitle: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  investigationItemCard: {
+    width: '100%',
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.16)',
+    padding: SPACING.md,
+    gap: 4,
+  },
+  openDecisionCard: {
+    width: '100%',
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.35)',
+    padding: SPACING.md,
+    gap: 6,
+  },
+  openDecisionBadge: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.1,
+  },
+  investigationQuestionText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+  },
+  investigationAnswerText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
+  investigationDetailText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textMuted,
+    lineHeight: 16,
+  },
+  investigationActionLink: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    marginTop: 2,
+  },
+
+  // Coverage Boundary cards
+  boundaryBadge: {
+    alignSelf: 'center',
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#F5A623',
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: 'rgba(245, 166, 35, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 166, 35, 0.3)',
+  },
+  boundaryHeading: {
+    fontSize: TYPOGRAPHY.sizes.md,
+    fontWeight: '600',
+    color: '#F5A623',
+    textAlign: 'center',
+  },
+  boundaryReexamineBtn: {
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  combinationQuestionRow: {
+    marginTop: 6,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+    gap: 2,
   },
 
   // Blocker card
@@ -785,11 +1380,42 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  // Review section
+  // Review section & Scope Summary
   reviewSection: {
     width: '100%',
     alignItems: 'center',
     gap: SPACING.sm,
+  },
+  scopeSummaryCard: {
+    width: '100%',
+    backgroundColor: COLORS.surfaceDark,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.18)',
+    padding: SPACING.md,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  scopeSummaryRow: {
+    gap: 2,
+  },
+  scopeSummaryLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+  },
+  scopeSummaryValue: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textPrimary,
+    lineHeight: 18,
+  },
+  scopeSummaryMeta: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 107, 43, 0.1)',
+    paddingTop: SPACING.xs,
   },
 
   // Movement indicator

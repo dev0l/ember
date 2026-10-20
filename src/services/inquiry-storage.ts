@@ -212,3 +212,37 @@ export function loadInquiryRow(inquiryId: string): { id: string; emberId: string
   if (!row) return null;
   return { id: row.id, emberId: row.ember_id, name: row.name };
 }
+
+/**
+ * Decline & Reset an uncommitted Inquiry before any Design Pack has been generated.
+ *
+ * Guarded: refuses (returns false) if any Design Pack record or version exists
+ * for this Inquiry, preserving historical artifact provenance.
+ *
+ * When permitted, deletes the `inquiries` row. Schema v2/v3 `ON DELETE CASCADE`
+ * atomically removes all associated `inquiry_answers` and `inquiry_decisions`.
+ */
+export function resetUncommittedInquiry(inquiryId: string): boolean {
+  const db = getDatabase();
+  let deleted = false;
+  db.withTransactionSync(() => {
+    const row = db.getFirstSync<{ design_pack_version: number }>(
+      `SELECT design_pack_version FROM inquiries WHERE id = ?`,
+      inquiryId,
+    );
+    if (!row || row.design_pack_version > 0) {
+      return;
+    }
+    const packCount = db.getFirstSync<{ count: number }>(
+      `SELECT COUNT(*) as count FROM design_packs WHERE inquiry_id = ?`,
+      inquiryId,
+    );
+    if ((packCount?.count ?? 0) > 0) {
+      return;
+    }
+    db.runSync(`DELETE FROM inquiries WHERE id = ?`, inquiryId);
+    deleted = true;
+  });
+  return deleted;
+}
+
