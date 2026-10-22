@@ -2,9 +2,9 @@
 // Edit Ember Screen
 //
 // Allows editing an existing Ember's fields:
-//   name, spark, questions, carried sentence, nature.
-// Loads the persisted EmberSeed, presents editable fields,
-// and saves changes back to the Markdown file.
+//   name, questions, carried sentence, nature
+//   (and legacy spark text only if already present on an older Ember;
+//    participating Sparks are coherent entities managed on the Ember surface).
 // ─────────────────────────────────────────────
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
@@ -220,9 +220,6 @@ export default function EditEmberScreen({
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Nature preserved in data model but not user-editable —
-              Ember cannot yet meaningfully honour the distinction */}
-
           {/* ── Name ── */}
           <View style={styles.section}>
             <Text style={styles.label}>Name</Text>
@@ -236,19 +233,21 @@ export default function EditEmberScreen({
             />
           </View>
 
-          {/* ── Spark ── */}
-          <View style={styles.section}>
-            <Text style={styles.label}>Spark</Text>
-            <TextInput
-              style={[styles.textInput, styles.multilineInput]}
-              value={spark}
-              onChangeText={setSpark}
-              placeholder="The initial seed..."
-              placeholderTextColor={COLORS.textMuted}
-              multiline
-              textAlignVertical="top"
-            />
-          </View>
+          {/* ── Legacy Spark text (only shown if already present on an older Ember) ── */}
+          {Boolean(seed.spark?.trim()) && (
+            <View style={styles.section}>
+              <Text style={styles.label}>Original Note</Text>
+              <TextInput
+                style={[styles.textInput, styles.multilineInput]}
+                value={spark}
+                onChangeText={setSpark}
+                placeholder="The initial seed..."
+                placeholderTextColor={COLORS.textMuted}
+                multiline
+                textAlignVertical="top"
+              />
+            </View>
+          )}
 
           {/* ── Questions ── */}
           <View style={styles.section}>
@@ -360,7 +359,6 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.xs,
     fontStyle: 'italic',
   },
-
 
   // Inputs
   textInput: {

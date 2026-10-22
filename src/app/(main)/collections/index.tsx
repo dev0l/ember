@@ -12,9 +12,11 @@ import { useFocusEffect, router } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import type { EmberSeed } from '@/core';
+import type { Spark } from '@/core/spark-types';
 import type { EmberProject } from '@/core/ember-project-types';
 import { EMBER_NATURE_LABELS } from '@/core';
 import { listEmbers } from '@/services/ember-storage';
+import { listSparks } from '@/services/spark-storage';
 import { listProjects } from '@/services/ember-project-storage';
 
 export interface CollectionsScreenProps {
@@ -34,12 +36,15 @@ export default function CollectionsScreen({
 }: CollectionsScreenProps = {}) {
   const [tab, setTab] = useState<'seeds' | 'projects'>('seeds');
   const [embers, setEmbers] = useState<EmberSeed[]>([]);
+  const [associatedSparks, setAssociatedSparks] = useState<Spark[]>([]);
   const [projects, setProjects] = useState<EmberProject[]>([]);
 
   const loadData = useCallback(() => {
     const loadedSeeds = listEmbers();
+    const loadedSparks = listSparks('ember-associated');
     const loadedProjects = listProjects();
     setEmbers(loadedSeeds);
+    setAssociatedSparks(loadedSparks);
     setProjects(loadedProjects);
   }, []);
 
@@ -51,6 +56,18 @@ export default function CollectionsScreen({
       loadData();
     }
   }, [isFocused, selectedEmberId, loadData]);
+
+  // Group participating Sparks by Ember ID for collection card previews & counts
+  const sparksByEmberId = useMemo(() => {
+    const map: Record<string, Spark[]> = {};
+    for (const s of associatedSparks) {
+      if (s.emberId) {
+        if (!map[s.emberId]) map[s.emberId] = [];
+        map[s.emberId].push(s);
+      }
+    }
+    return map;
+  }, [associatedSparks]);
 
   // Legacy = Inquiries with no Ember (seedless). Seed-linked Inquiries are
   // reached through their Ember, so the Legacy tab lists only these.
@@ -114,7 +131,7 @@ export default function CollectionsScreen({
         params: { id: project.id },
       } as any);
     }
-  }, []);
+  }, [embers, onSelectEmber]);
 
   const handleCreate = useCallback(() => {
     if (onCreateEmber) {
@@ -198,51 +215,62 @@ export default function CollectionsScreen({
               data={embers}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.listContent}
-              renderItem={({ item }) => (
-                <Pressable
-                  style={[
-                    styles.card,
-                    selectedEmberId === item.id && styles.cardSelected,
-                  ]}
-                  onPress={() => handleOpenEmber(item.id)}
-                >
-                  <View style={styles.cardHeader}>
-                    <Text style={styles.cardNature}>
-                      {EMBER_NATURE_LABELS[item.nature]}
+              renderItem={({ item }) => {
+                const emberSparks = sparksByEmberId[item.id] ?? [];
+                const previewSparkText =
+                  item.spark || (emberSparks.length > 0 ? emberSparks[0].content : undefined);
+                return (
+                  <Pressable
+                    style={[
+                      styles.card,
+                      selectedEmberId === item.id && styles.cardSelected,
+                    ]}
+                    onPress={() => handleOpenEmber(item.id)}
+                  >
+                    <View style={styles.cardHeader}>
+                      <Text style={styles.cardNature}>
+                        {EMBER_NATURE_LABELS[item.nature]}
+                      </Text>
+                      <Text style={styles.cardDate}>
+                        {formatRelativeDate(item.updatedAt)}
+                      </Text>
+                    </View>
+                    <Text style={styles.cardTitle} numberOfLines={1}>
+                      {item.name || 'Untitled'}
                     </Text>
-                    <Text style={styles.cardDate}>
-                      {formatRelativeDate(item.updatedAt)}
-                    </Text>
-                  </View>
-                  <Text style={styles.cardTitle} numberOfLines={1}>
-                    {item.name || 'Untitled'}
-                  </Text>
-                  {item.carriedSentence && (
-                    <Text style={styles.cardEssence} numberOfLines={1}>
-                      {item.carriedSentence}
-                    </Text>
-                  )}
-                  {item.spark && !item.carriedSentence && (
-                    <Text style={styles.cardSpark} numberOfLines={2}>
-                      {item.spark}
-                    </Text>
-                  )}
-                  <View style={styles.cardFooter}>
-                    {item.questions.length > 0 && (
-                      <Text style={styles.cardMeta}>
-                        {item.questions.length} question
-                        {item.questions.length !== 1 ? 's' : ''}
+                    {item.carriedSentence && (
+                      <Text style={styles.cardEssence} numberOfLines={1}>
+                        {item.carriedSentence}
                       </Text>
                     )}
-                    {item.sources.length > 0 && (
-                      <Text style={styles.cardMeta}>
-                        {item.sources.length} source
-                        {item.sources.length !== 1 ? 's' : ''}
+                    {previewSparkText && !item.carriedSentence && (
+                      <Text style={styles.cardSpark} numberOfLines={2}>
+                        {previewSparkText}
                       </Text>
                     )}
-                  </View>
-                </Pressable>
-              )}
+                    <View style={styles.cardFooter}>
+                      {emberSparks.length > 0 && (
+                        <Text style={styles.cardMeta}>
+                          {emberSparks.length} spark
+                          {emberSparks.length !== 1 ? 's' : ''}
+                        </Text>
+                      )}
+                      {item.questions.length > 0 && (
+                        <Text style={styles.cardMeta}>
+                          {item.questions.length} question
+                          {item.questions.length !== 1 ? 's' : ''}
+                        </Text>
+                      )}
+                      {item.sources.length > 0 && (
+                        <Text style={styles.cardMeta}>
+                          {item.sources.length} source
+                          {item.sources.length !== 1 ? 's' : ''}
+                        </Text>
+                      )}
+                    </View>
+                  </Pressable>
+                );
+              }}
               ListFooterComponent={
                 <Pressable onPress={handleCreate} style={styles.addButton}>
                   <Text style={styles.addButtonText}>+ Create another Ember</Text>

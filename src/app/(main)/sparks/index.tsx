@@ -36,12 +36,16 @@ import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 export interface SparksScreenProps {
   hideHeader?: boolean;
   isFocused?: boolean;
+  refreshTrigger?: number;
+  onSparksChanged?: () => void;
   onOpenEmber?: (emberId: string, seed?: EmberSeed) => void;
 }
 
 export default function SparksScreen({
   hideHeader = false,
   isFocused = true,
+  refreshTrigger = 0,
+  onSparksChanged,
   onOpenEmber,
 }: SparksScreenProps = {}) {
   const [title, setTitle] = useState('');
@@ -70,7 +74,7 @@ export default function SparksScreen({
     if (isFocused) {
       loadData();
     }
-  }, [isFocused, loadData]);
+  }, [isFocused, refreshTrigger, loadData]);
 
   // Resolve ember names for participating sparks
   const emberNames = useMemo(() => {
@@ -105,7 +109,8 @@ export default function SparksScreen({
     const status = sparkFilter === 'all' ? undefined :
                    sparkFilter === 'lingering' ? 'lingering' as const : 'ember-associated' as const;
     setSparks(listSparks(status));
-  }, [title, content, sparkFilter]);
+    onSparksChanged?.();
+  }, [title, content, sparkFilter, onSparksChanged]);
 
   // ── Selection (constrained to lingering sparks only) ──
   const toggleSelect = useCallback((spark: Spark) => {
@@ -126,20 +131,15 @@ export default function SparksScreen({
   }, []);
 
   // ── Spark a New Ember ──
-  // Both paths now converge on EmberSeed as the Ember identity.
-  // The user encounters the Ember before Inquiry begins.
+  // Both paths now converge on EmberSeed as the Ember identity,
+  // with selected Sparks participating directly via spark_participations.
   const handleSparkEmber = useCallback(() => {
     const selected = sparks.filter((s) => selectedIds.has(s.id));
     if (selected.length === 0) return;
 
-    const combinedContent = selected
-      .map((s) => s.content)
-      .join('\n\n');
-
-    // Create an EmberSeed — the Ember identity
+    // Create an EmberSeed — the Ember identity (participating Sparks carry the Spark material)
     const seed = createEmberSeed('open', {
       name: selected.length === 1 ? selected[0].title : undefined,
-      spark: combinedContent,
     });
 
     // Persist the Ember
@@ -152,6 +152,7 @@ export default function SparksScreen({
     );
 
     loadData();
+    onSparksChanged?.();
 
     if (onOpenEmber) {
       onOpenEmber(seed.id, seed);
@@ -160,7 +161,7 @@ export default function SparksScreen({
 
     // Navigate to the Ember View — encounter the Ember before Inquiry
     router.replace(`/(main)/ember/${seed.id}` as any);
-  }, [sparks, selectedIds, loadData, onOpenEmber]);
+  }, [sparks, selectedIds, loadData, onSparksChanged, onOpenEmber]);
 
   // ── Participate in Existing Ember ──
   const handleSelectEmber = useCallback((emberId: string) => {
@@ -173,6 +174,7 @@ export default function SparksScreen({
     );
     setShowEmberPicker(false);
     loadData();
+    onSparksChanged?.();
 
     if (onOpenEmber) {
       const seed = loadEmber(emberId) ?? undefined;
@@ -181,7 +183,7 @@ export default function SparksScreen({
     }
 
     router.replace(`/(main)/ember/${emberId}` as any);
-  }, [sparks, selectedIds, loadData, onOpenEmber]);
+  }, [sparks, selectedIds, loadData, onSparksChanged, onOpenEmber]);
 
   // ── Delete lingering sparks ──
   const handleDeleteSparks = useCallback(() => {
@@ -204,11 +206,12 @@ export default function SparksScreen({
                            sparkFilter === 'lingering' ? 'lingering' as const : 'ember-associated' as const;
             setSparks(listSparks(status));
             setSelectedIds(new Set());
+            onSparksChanged?.();
           },
         },
       ],
     );
-  }, [sparks, selectedIds, sparkFilter]);
+  }, [sparks, selectedIds, sparkFilter, onSparksChanged]);
 
   const handleBack = useCallback(() => {
     if (router.canGoBack()) {

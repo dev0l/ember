@@ -18,7 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 
-import { StageMode, TerritoryStackState, EmberPlateData, DevelopingPlateData } from './types';
+import { StageMode, TerritoryStackState, EmberPlateData } from './types';
 import { PlateRail, RAIL_HEIGHT } from './PlateRail';
 import { PlateCover } from './PlateCover';
 import CollectionsScreen from '@/app/(main)/collections';
@@ -27,8 +27,11 @@ import CreateEmberScreen from '@/app/(main)/create';
 import EmberViewScreen from '@/app/(main)/ember/[id]';
 import EditEmberScreen from '@/app/(main)/ember/edit/[id]';
 import EmberSessionScreen from '@/app/(main)/ember-session/[id]';
-import { loadEmber } from '@/services/ember-storage';
-import type { EmberSeed } from '@/core';
+import { QuickCaptureModal } from '@/components/sparks/QuickCaptureModal';
+import { loadEmber, saveEmber } from '@/services/ember-storage';
+import { listSparks, associateSparksWithEmber } from '@/services/spark-storage';
+import { createEmberSeed, type EmberSeed } from '@/core';
+import type { Spark } from '@/core/spark-types';
 
 const ANIM_DURATION = 550;
 const ANIM_EASING = Easing.bezier(0.32, 0.04, 0.18, 1);
@@ -43,6 +46,12 @@ export function TerritoryStage() {
   const [isCreateDirty, setIsCreateDirty] = useState(false);
   const [isEditingEmber, setIsEditingEmber] = useState(false);
   const [isEditDirty, setIsEditDirty] = useState(false);
+
+  // Quick Capture modal state & cross-surface Spark refresh counter
+  const [showQuickCapture, setShowQuickCapture] = useState(false);
+  const [sparksRefreshTrigger, setSparksRefreshTrigger] = useState(0);
+  const [lingeringSparkCount, setLingeringSparkCount] = useState(0);
+  const [externalStagedSpark, setExternalStagedSpark] = useState<Spark | null>(null);
 
   // Stacking state architecture — preserving per-territory lineages
   // Law I: Plate order represents lineage, not focus. Focus changes expansion, not order.
@@ -65,6 +74,24 @@ export function TerritoryStage() {
   const numInteriorRails = hasSession ? 2 : 1;
   const availableSurfaceHeight = Math.max(0, interiorHeight - numInteriorRails * RAIL_HEIGHT);
 
+  // Keep lingering spark count synchronized for the lower cover plate etching
+  const refreshSparksMetadata = useCallback(() => {
+    try {
+      const lingering = listSparks('lingering');
+      setLingeringSparkCount(lingering.length);
+    } catch {
+      // Ignore pre-init fallback
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSparksMetadata();
+  }, [refreshSparksMetadata, sparksRefreshTrigger, mode]);
+
+  const notifySparksChanged = useCallback(() => {
+    setSparksRefreshTrigger((n) => n + 1);
+  }, []);
+
   // ── Guard Unsaved Create / Edit Work ──
   const guardUnsavedWork = useCallback(
     (onProceed: () => void) => {
@@ -72,7 +99,7 @@ export function TerritoryStage() {
         if (isCreateDirty) {
           Alert.alert(
             'Discard Unsaved Ember?',
-            'You have unsaved thoughts in this new Ember. Discard them and leave?',
+            'You have unsaved thoughts in this new Ember. Discard them and leave? (Any Sparks you caught will remain safely in Lingering Sparks.)',
             [
               { text: 'Keep Editing', style: 'cancel' },
               {
@@ -81,6 +108,7 @@ export function TerritoryStage() {
                 onPress: () => {
                   setIsCreatingEmber(false);
                   setIsCreateDirty(false);
+                  setExternalStagedSpark(null);
                   onProceed();
                 },
               },
@@ -90,6 +118,7 @@ export function TerritoryStage() {
         }
         setIsCreatingEmber(false);
         setIsCreateDirty(false);
+        setExternalStagedSpark(null);
       }
 
       if (mode === 'embers' && stackState.embersFocus === 'ember' && isEditingEmber) {
@@ -179,6 +208,7 @@ export function TerritoryStage() {
       };
       setIsCreatingEmber(false);
       setIsCreateDirty(false);
+      setExternalStagedSpark(null);
       setIsEditingEmber(false);
       setIsEditDirty(false);
       setStackState((prev) => ({
@@ -195,7 +225,7 @@ export function TerritoryStage() {
     [rail1Progress, rail2Progress],
   );
 
-  // Open an Ember directly in the Embers plate stack from Sparks (Spark New Ember / Participate in Ember)
+  // Open an Ember directly in the Embers plate stack from Sparks (Spark New Ember / Participate in Ember / Quick Capture)
   const handleOpenEmberFromSparks = useCallback(
     (id: string, seed?: EmberSeed) => {
       const resolvedSeed = seed ?? loadEmber(id) ?? undefined;
@@ -206,6 +236,7 @@ export function TerritoryStage() {
       };
       setIsCreatingEmber(false);
       setIsCreateDirty(false);
+      setExternalStagedSpark(null);
       setIsEditingEmber(false);
       setIsEditDirty(false);
       setMode('embers');
@@ -230,10 +261,55 @@ export function TerritoryStage() {
     }
   }, [params.openEmberId, handleOpenEmberFromSparks]);
 
+  // ── Quick Capture Handlers ("Visible across app, accessible outside Inquiry") ──
+  const isInActiveInquiry = mode === 'embers' && stackState.embersFocus === 'developing';
+  const isCreatingInStage =
+    mode === 'embers' && stackState.embersFocus === 'collection' && isCreatingEmber;
+
+  const handleOpenQuickCapture = useCallback(() => {
+    if (isInActiveInquiry) {
+      Alert.alert(
+        'Inquiry in Progress',
+        'Quick Capture is paused while you are inside an active Inquiry session so your focus stays undisturbed. Step back to the Ember rail or Split when you want to catch a new Spark.',
+        [{ text: 'Got it' }],
+      );
+      return;
+    }
+    setShowQuickCapture(true);
+  }, [isInActiveInquiry]);
+
+  const handleQuickCaptureSaved = useCallback(
+    (spark: Spark) => {
+      notifySparksChanged();
+      if (isCreatingInStage) {
+        setExternalStagedSpark(spark);
+      }
+    },
+    [notifySparksChanged, isCreatingInStage],
+  );
+
+  const handleCarrySparkIntoNewEmber = useCallback(
+    (spark: Spark) => {
+      const seed = createEmberSeed('open', {
+        name: spark.title,
+      });
+      saveEmber(seed);
+      associateSparksWithEmber([spark.id], seed.id);
+      notifySparksChanged();
+      handleOpenEmberFromSparks(seed.id, seed);
+    },
+    [notifySparksChanged, handleOpenEmberFromSparks],
+  );
+
+  const handleOpenSparksFromQuickCapture = useCallback(() => {
+    guardUnsavedWork(openSparks);
+  }, [guardUnsavedWork, openSparks]);
+
   // ── In-Stage Create & Edit Handlers ──
   const handleStartCreateEmber = useCallback(() => {
     setIsCreatingEmber(true);
     setIsCreateDirty(false);
+    setExternalStagedSpark(null);
   }, []);
 
   const handleRequestCancelCreate = useCallback(() => {
@@ -244,9 +320,11 @@ export function TerritoryStage() {
     (seed: EmberSeed) => {
       setIsCreatingEmber(false);
       setIsCreateDirty(false);
+      setExternalStagedSpark(null);
+      notifySparksChanged();
       handleSelectEmber(seed.id, seed);
     },
-    [handleSelectEmber],
+    [notifySparksChanged, handleSelectEmber],
   );
 
   const handleStartEditEmber = useCallback(() => {
@@ -357,6 +435,7 @@ export function TerritoryStage() {
     if (!stackState.selectedEmber) return;
     setIsCreatingEmber(false);
     setIsCreateDirty(false);
+    setExternalStagedSpark(null);
     setStackState((prev) => ({
       ...prev,
       embersFocus: 'ember',
@@ -370,6 +449,7 @@ export function TerritoryStage() {
     if (!stackState.activeSession) return;
     setIsCreatingEmber(false);
     setIsCreateDirty(false);
+    setExternalStagedSpark(null);
     setIsEditingEmber(false);
     setIsEditDirty(false);
     setStackState((prev) => ({
@@ -384,6 +464,7 @@ export function TerritoryStage() {
   const dismissEmber = useCallback(() => {
     setIsCreatingEmber(false);
     setIsCreateDirty(false);
+    setExternalStagedSpark(null);
     setIsEditingEmber(false);
     setIsEditDirty(false);
     rail1Progress.value = withTiming(0, { duration: ANIM_DURATION, easing: ANIM_EASING });
@@ -549,10 +630,11 @@ export function TerritoryStage() {
   if (mode === 'split') {
     topRole = 'OPEN ↓';
   } else if (mode === 'embers') {
-    if (
-      (stackState.selectedEmber &&
-        (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')) ||
-      (stackState.embersFocus === 'collection' && isCreatingEmber)
+    if (stackState.embersFocus === 'collection' && isCreatingEmber) {
+      topRole = 'CREATE EMBER ◆';
+    } else if (
+      stackState.selectedEmber &&
+      (stackState.embersFocus === 'ember' || stackState.embersFocus === 'developing')
     ) {
       topRole = 'COLLECTION ↑';
     } else {
@@ -573,13 +655,15 @@ export function TerritoryStage() {
 
   const bottomRole =
     mode === 'split'
-      ? '↑ OPEN'
+      ? lingeringSparkCount > 0
+        ? `${lingeringSparkCount} LINGERING · ↑ OPEN`
+        : '↑ OPEN'
       : mode === 'sparks'
       ? 'HERE ◆'
       : 'OPEN ↓';
 
   // Dynamic status hint
-  let footerHint = 'Draw the plates apart. Their edges stay.';
+  let footerHint = 'Draw the plates apart, or catch a spark directly below.';
   if (mode === 'sparks') {
     if (stackState.activeSession && stackState.lastEmbersFocus === 'developing') {
       const sessionTitle =
@@ -630,6 +714,25 @@ export function TerritoryStage() {
         </View>
 
         <View style={styles.headerActions}>
+          {/* Stage-level Quick Capture Pill: Visible across app, accessible outside Inquiry */}
+          <Pressable
+            style={[
+              styles.quickCaptureHeaderPill,
+              isInActiveInquiry && styles.quickCaptureHeaderPillLocked,
+            ]}
+            onPress={handleOpenQuickCapture}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={
+              isInActiveInquiry
+                ? 'Quick Capture paused during Inquiry'
+                : 'Quick Capture a Spark'
+            }
+          >
+            <Text style={styles.quickCaptureHeaderGlyph}>⌁</Text>
+            <Text style={styles.quickCaptureHeaderText}>+ Spark</Text>
+          </Pressable>
+
           {mode === 'embers' && (stackState.selectedEmber || isCreatingEmber) && (
             <Pressable
               style={styles.headerButton}
@@ -699,6 +802,7 @@ export function TerritoryStage() {
                   onCreated={handleEmberCreated}
                   onCancel={handleRequestCancelCreate}
                   onDirtyChange={setIsCreateDirty}
+                  externalStagedSpark={externalStagedSpark}
                 />
               ) : (
                 <CollectionsScreen
@@ -727,6 +831,7 @@ export function TerritoryStage() {
                       onCreated={handleEmberCreated}
                       onCancel={handleRequestCancelCreate}
                       onDirtyChange={setIsCreateDirty}
+                      externalStagedSpark={externalStagedSpark}
                     />
                   ) : (
                     <CollectionsScreen
@@ -805,6 +910,8 @@ export function TerritoryStage() {
                       onRemoved={dismissEmber}
                       onOpenSession={handleOpenSession}
                       onCloseSession={handleCloseSession}
+                      onSparksChanged={notifySparksChanged}
+                      refreshTrigger={sparksRefreshTrigger}
                       isFocused={stackState.embersFocus === 'ember' && !isEditingEmber}
                     />
                   )}
@@ -871,6 +978,8 @@ export function TerritoryStage() {
             <SparksScreen
               hideHeader={true}
               isFocused={mode === 'sparks'}
+              refreshTrigger={sparksRefreshTrigger}
+              onSparksChanged={notifySparksChanged}
               onOpenEmber={handleOpenEmberFromSparks}
             />
           </View>
@@ -905,6 +1014,7 @@ export function TerritoryStage() {
             role={bottomRole}
             height={halfHeight}
             onPress={handleBottomPlatePress}
+            onQuickCapture={mode === 'split' ? handleOpenQuickCapture : undefined}
           />
         </Animated.View>
 
@@ -919,6 +1029,19 @@ export function TerritoryStage() {
       <View style={styles.footer}>
         <Text style={styles.hintText}>{footerHint}</Text>
       </View>
+
+      {/* ── Stage-Level Quick Capture Modal ── */}
+      <QuickCaptureModal
+        visible={showQuickCapture}
+        contextMode={isCreatingInStage ? 'attach' : 'standalone'}
+        targetEmberLabel={isCreatingInStage ? 'New Ember' : undefined}
+        onClose={() => setShowQuickCapture(false)}
+        onCaptured={handleQuickCaptureSaved}
+        onCarryIntoNewEmber={handleCarrySparkIntoNewEmber}
+        onOpenSparksTerritory={
+          mode !== 'sparks' ? handleOpenSparksFromQuickCapture : undefined
+        }
+      />
     </SafeAreaView>
   );
 }
@@ -956,11 +1079,39 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
+  },
+  quickCaptureHeaderPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.35)',
+    backgroundColor: 'rgba(255, 107, 43, 0.08)',
+  },
+  quickCaptureHeaderPillLocked: {
+    opacity: 0.35,
+    borderColor: '#4A3727',
+    backgroundColor: 'transparent',
+  },
+  quickCaptureHeaderGlyph: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+  },
+  quickCaptureHeaderText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#F5ECE0',
+    letterSpacing: 0.6,
   },
   headerButton: {
     paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   headerButtonText: {
     fontSize: 12,

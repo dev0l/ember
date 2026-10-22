@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
-import Animated from 'react-native-reanimated';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 
 export interface PlateCoverProps {
@@ -10,6 +9,7 @@ export interface PlateCoverProps {
   etchSub?: string;
   role: string;
   onPress: () => void;
+  onQuickCapture?: () => void;
   height: number;
 }
 
@@ -20,47 +20,86 @@ export function PlateCover({
   etchSub,
   role,
   onPress,
+  onQuickCapture,
   height,
 }: PlateCoverProps) {
   const isTop = position === 'top';
 
   return (
-    <Pressable
-      style={({ pressed }) => [
+    <View
+      style={[
         styles.cover,
         isTop ? styles.topCover : styles.bottomCover,
         { height },
-        pressed && styles.coverPressed,
       ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={`Open ${title} territory`}
     >
-      {/* Etch Text (for top cover, stays near top edge) */}
-      {isTop && (etchTop || etchSub) ? (
-        <View style={styles.topEtchContainer}>
-          {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
-          {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
+      {/* Full-Plate Tap Target */}
+      <Pressable
+        style={({ pressed }) => [
+          StyleSheet.absoluteFill,
+          pressed && styles.coverPressed,
+        ]}
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Open ${title} territory`}
+      >
+        {/* Etch Text (for top cover, stays near top edge) */}
+        {isTop && (etchTop || etchSub) ? (
+          <View style={styles.topEtchContainer}>
+            {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
+            {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
+          </View>
+        ) : null}
+
+        {/* Cover Label (sits precisely in the 48px seam edge) */}
+        <View style={[styles.labelRow, isTop ? styles.labelRowBottom : styles.labelRowTop]}>
+          <View style={styles.titleGroup}>
+            <Text style={styles.dot}>•</Text>
+            <Text style={styles.title} numberOfLines={1}>{title}</Text>
+          </View>
+          <Text style={styles.role}>{role}</Text>
+        </View>
+
+        {/* Etch Text (for bottom cover, stays near bottom edge) */}
+        {!isTop && (etchTop || etchSub) ? (
+          <View style={styles.bottomEtchContainer}>
+            {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
+            {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
+          </View>
+        ) : null}
+      </Pressable>
+
+      {/* Sibling Engraved Quick Capture Recess (on lower Sparks plate face, below the 48px rail lip) */}
+      {!isTop && onQuickCapture ? (
+        <View style={styles.quickCaptureContainer} pointerEvents="box-none">
+          <Pressable
+            onPress={onQuickCapture}
+            style={({ pressed }) => [
+              styles.quickCaptureRecess,
+              pressed && styles.quickCaptureRecessPressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Quick capture a spark"
+          >
+            <View style={styles.quickCaptureLeft}>
+              <Text style={styles.quickCaptureGlyph}>⌁</Text>
+              <Text style={styles.quickCapturePrompt}>Catch a spark...</Text>
+            </View>
+            <View style={styles.quickCaptureModalities}>
+              <View style={styles.modalityChipActive}>
+                <Text style={styles.modalityChipActiveText}>Aa</Text>
+              </View>
+              <View style={styles.modalityChipMuted}>
+                <Text style={styles.modalityChipMutedText}>🎙</Text>
+              </View>
+              <View style={styles.modalityChipMuted}>
+                <Text style={styles.modalityChipMutedText}>📷</Text>
+              </View>
+            </View>
+          </Pressable>
         </View>
       ) : null}
-
-      {/* Cover Label (sits precisely in the 48px seam edge) */}
-      <View style={[styles.labelRow, isTop ? styles.labelRowBottom : styles.labelRowTop]}>
-        <View style={styles.titleGroup}>
-          <Text style={styles.dot}>•</Text>
-          <Text style={styles.title} numberOfLines={1}>{title}</Text>
-        </View>
-        <Text style={styles.role}>{role}</Text>
-      </View>
-
-      {/* Etch Text (for bottom cover, stays near bottom edge) */}
-      {!isTop && (etchTop || etchSub) ? (
-        <View style={styles.bottomEtchContainer}>
-          {etchTop ? <Text style={styles.etch}>{etchTop}</Text> : null}
-          {etchSub ? <Text style={styles.etchSub}>{etchSub}</Text> : null}
-        </View>
-      ) : null}
-    </Pressable>
+    </View>
   );
 }
 
@@ -70,19 +109,15 @@ const styles = StyleSheet.create({
     backgroundColor: '#161511',
     borderWidth: 1,
     borderColor: '#4E3A2A',
-    position: 'absolute',
-    left: 0,
-    right: 0,
+    position: 'relative',
     zIndex: 6,
     overflow: 'hidden',
   },
   topCover: {
-    top: 0,
     borderBottomWidth: 1,
     borderBottomColor: '#B86A35',
   },
   bottomCover: {
-    bottom: 0,
     borderTopWidth: 1,
     borderTopColor: '#B86A35',
   },
@@ -161,5 +196,73 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     includeFontPadding: false,
   },
+  quickCaptureContainer: {
+    position: 'absolute',
+    top: 64,
+    left: 20,
+    right: 20,
+    zIndex: 2,
+  },
+  quickCaptureRecess: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#11100C',
+    borderWidth: 1,
+    borderColor: '#4A3626',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  quickCaptureRecessPressed: {
+    borderColor: COLORS.emberOrange,
+    backgroundColor: '#191711',
+  },
+  quickCaptureLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  quickCaptureGlyph: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+  },
+  quickCapturePrompt: {
+    fontSize: 13,
+    color: '#C4B19B',
+    letterSpacing: 0.4,
+  },
+  quickCaptureModalities: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  modalityChipActive: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.4)',
+    backgroundColor: 'rgba(255, 107, 43, 0.1)',
+  },
+  modalityChipActiveText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.5,
+  },
+  modalityChipMuted: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#2E2319',
+    backgroundColor: '#16140F',
+    opacity: 0.65,
+  },
+  modalityChipMutedText: {
+    fontSize: 9,
+  },
 });
-
