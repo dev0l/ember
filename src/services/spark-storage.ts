@@ -120,6 +120,13 @@ export function deleteSpark(id: string): void {
   db.runSync(`DELETE FROM sparks WHERE id = ?`, id);
 }
 
+// ── Release Spark from Ember Participation ──
+
+export function releaseSparkFromEmber(sparkId: string): void {
+  const db = getDatabase();
+  db.runSync(`DELETE FROM spark_participations WHERE spark_id = ?`, sparkId);
+}
+
 // ── Associate Sparks with Ember ──
 
 export function associateSparksWithEmber(

@@ -811,6 +811,7 @@ export function TerritoryStage() {
                   onCreateEmber={handleStartCreateEmber}
                   selectedEmberId={null}
                   isFocused={mode === 'embers'}
+                  refreshTrigger={sparksRefreshTrigger}
                 />
               )
             ) : (
@@ -840,6 +841,7 @@ export function TerritoryStage() {
                       onCreateEmber={handleStartCreateEmber}
                       selectedEmberId={stackState.selectedEmber.id}
                       isFocused={mode === 'embers' && stackState.embersFocus === 'collection'}
+                      refreshTrigger={sparksRefreshTrigger}
                     />
                   )}
                 </Animated.View>

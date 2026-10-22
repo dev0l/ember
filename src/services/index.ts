@@ -18,6 +18,7 @@ export {
   loadSpark,
   listSparks,
   deleteSpark,
+  releaseSparkFromEmber,
   associateSparksWithEmber,
 } from './spark-storage';
 
@@ -28,6 +29,7 @@ export {
   loadProjectByEmberId,
   listProjects,
   deleteProject,
+  deleteDesignPackFilesForEmber,
   saveDesignPack,
   loadDesignPack,
   loadLatestDesignPack,
@@ -52,4 +54,3 @@ export {
   loadInquiryRow,
   resetUncommittedInquiry,
 } from './inquiry-storage';
-

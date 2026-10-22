@@ -38,3 +38,15 @@ export type {
   ActivatedProposition,
   ConfidenceLevel,
 } from './ember-project-types';
+
+// Ember Lifecycle & Completion Assembly
+export {
+  buildEmberOriginalMaterial,
+  describeEmberDeletionSummary,
+  buildEmberCompletionRecord,
+} from './ember-completion';
+export type {
+  EmberDeletionSummaryInput,
+  EmberDeletionSummary,
+  EmberCompletionInput,
+} from './ember-completion';

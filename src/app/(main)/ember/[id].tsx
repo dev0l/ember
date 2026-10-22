@@ -8,7 +8,7 @@
 // lingering Spark participation), and its Inquiry progression.
 // ─────────────────────────────────────────────
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -19,16 +19,23 @@ import {
   ActivityIndicator,
   Modal,
   FlatList,
+  Share,
+  TurboModuleRegistry,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
-import type { EmberSeed } from '@/core';
+import {
+  buildEmberOriginalMaterial,
+  describeEmberDeletionSummary,
+  buildEmberCompletionRecord,
+  type EmberSeed,
+} from '@/core';
 import type { Spark } from '@/core/spark-types';
 import { loadEmber, deleteEmber } from '@/services/ember-storage';
 import { serializeEmberMarkdown } from '@/services/ember-markdown';
-import { listSparks, saveSpark, associateSparksWithEmber } from '@/services/spark-storage';
+import { listSparks, associateSparksWithEmber } from '@/services/spark-storage';
 import {
   loadLatestDesignPack,
   saveDesignPack,
@@ -49,34 +56,7 @@ import {
 } from '@/inquiry';
 import { QuickCaptureModal } from '@/components/sparks/QuickCaptureModal';
 
-/**
- * Composes the verbatim originalMaterial passed to Design Pack generation.
- * Preserves legacy `seed.spark` text AND includes all participating Sparks,
- * while avoiding duplicate blocks when an older Ember copied its initial
- * participating Spark text into `seed.spark`.
- */
-export function buildEmberOriginalMaterial(
-  seed: EmberSeed,
-  participatingSparks: Spark[],
-): string | undefined {
-  const seedSpark = seed.spark?.trim() ?? '';
-  const sparkContents = participatingSparks
-    .map((s) => s.content.trim())
-    .filter((text) => text.length > 0);
-
-  const blocks: string[] = [];
-  if (seedSpark.length > 0) {
-    blocks.push(seedSpark);
-  }
-
-  for (const text of sparkContents) {
-    if (!seedSpark.includes(text) && !blocks.includes(text)) {
-      blocks.push(text);
-    }
-  }
-
-  return blocks.length > 0 ? blocks.join('\n\n') : undefined;
-}
+export { buildEmberOriginalMaterial };
 
 export interface EmberViewScreenProps {
   emberId?: string;
@@ -110,13 +90,22 @@ export default function EmberViewScreen({
   const [participatingSparks, setParticipatingSparks] = useState<Spark[]>([]);
   const [inquiryInfo, setInquiryInfo] = useState<{ id: string; emberId: string; name: string } | null>(null);
   const [inquiryState, setInquiryState] = useState<InquiryState | null>(null);
-  const [designPack, setDesignPack] = useState<{ version: number; staleness: 'current' | 'stale' | 'unknown' } | null>(null);
+  const [designPack, setDesignPack] = useState<{
+    version: number;
+    staleness: 'current' | 'stale' | 'unknown';
+    markdown: string;
+    configurationId?: string;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Contextual Spark capture & Lingering Spark picker modals
   const [showQuickCapture, setShowQuickCapture] = useState(false);
   const [showLingeringPicker, setShowLingeringPicker] = useState(false);
   const [lingeringSparks, setLingeringSparks] = useState<Spark[]>([]);
+
+  // Minimal Ember Completion modal state
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [copiedCompletion, setCopiedCompletion] = useState(false);
 
   // Reload data whenever id changes or screen comes into focus
   const loadData = useCallback(() => {
@@ -163,7 +152,12 @@ export default function EmberViewScreen({
     const pack = loadLatestDesignPack(inq.id);
     if (pack) {
       const staleness = designPackStaleness(pack.record?.reviewFingerprint, state);
-      setDesignPack({ version: pack.version, staleness });
+      setDesignPack({
+        version: pack.version,
+        staleness,
+        markdown: pack.markdown,
+        configurationId: pack.record?.configurationId,
+      });
     } else {
       setDesignPack(null);
     }
@@ -313,7 +307,12 @@ export default function EmberViewScreen({
         reviewFingerprint: result.state.fingerprints.review,
       });
 
-      setDesignPack({ version: nextVersion, staleness: 'current' });
+      setDesignPack({
+        version: nextVersion,
+        staleness: 'current',
+        markdown: result.markdown,
+        configurationId: result.state.designPack.adoptedConfigurationId!,
+      });
       onCloseSession?.();
       router.push({
         pathname: '/(main)/design-pack/[id]',
@@ -325,48 +324,116 @@ export default function EmberViewScreen({
     }
   }, [inquiryInfo, inquiryState, seed, participatingSparks, designPack, onCloseSession]);
 
-  // ── Remove Ember ──
-  // Guardian amendment: only undeveloped Embers can be removed cleanly.
-  // Developed Embers encounter the relational boundary.
-  const handleRemove = useCallback(() => {
-    if (!seed || !id) return;
+  // ── Assembled Completion Record (derived strictly from persisted material) ──
+  const completionMarkdown = useMemo(() => {
+    if (!seed || !showCompleteModal) return '';
+    return buildEmberCompletionRecord({
+      seed,
+      participatingSparks,
+      inquiryState,
+      designPack: designPack
+        ? {
+            version: designPack.version,
+            markdown: designPack.markdown,
+            configurationId: designPack.configurationId,
+          }
+        : null,
+    });
+  }, [seed, showCompleteModal, participatingSparks, inquiryState, designPack]);
 
-    const hasLineage = Boolean(
-      (inquiryState && inquiryState.questions.some(q => q.answer !== undefined)) ||
-      designPack !== null,
-    );
+  const handleOpenCompleteModal = useCallback(() => {
+    setCopiedCompletion(false);
+    setShowCompleteModal(true);
+  }, []);
 
-    if (hasLineage) {
-      // This Ember has an associated Inquiry with answers or packs — removal is relationally non-trivial
-      Alert.alert(
-        'Removal boundary',
-        'This Ember has been developed into an Inquiry. Removing an Ember with existing Inquiry lineage requires answering questions about what happens to conditions, propositions, and any generated artifacts.\n\nThis boundary has become relationally non-trivial. Removal for developed Embers is deferred to the database cycle.',
-        [{ text: 'OK' }],
-      );
-      return;
+  const handleCopyCompletion = useCallback(async () => {
+    if (!completionMarkdown) return;
+    try {
+      const nativeClipboard = TurboModuleRegistry.get('Clipboard') as {
+        setString?: (content: string) => void;
+      } | null;
+      if (nativeClipboard?.setString) {
+        nativeClipboard.setString(completionMarkdown);
+        setCopiedCompletion(true);
+        setTimeout(() => setCopiedCompletion(false), 2500);
+        return;
+      }
+      await Share.share({
+        title: `${seed?.name || 'Ember'} — Completion Record`,
+        message: completionMarkdown,
+      });
+    } catch {
+      Alert.alert('Copy Error', 'Could not copy the completion record.');
     }
+  }, [completionMarkdown, seed]);
 
+  const handleShareCompletion = useCallback(async () => {
+    if (!completionMarkdown) return;
+    try {
+      await Share.share({
+        title: `${seed?.name || 'Ember'} — Completion Record`,
+        message: completionMarkdown,
+      });
+    } catch {
+      // User cancelled share sheet
+    }
+  }, [completionMarkdown, seed]);
+
+  const handleConfirmCompleteAndClear = useCallback(() => {
+    if (!seed || !id) return;
+    const sparkNote =
+      participatingSparks.length > 0
+        ? `\n\n${participatingSparks.length} participating Spark${participatingSparks.length === 1 ? '' : 's'} will return to Lingering Sparks.`
+        : '';
     Alert.alert(
-      'Remove Ember',
-      `Remove this Ember?${participatingSparks.length > 0 ? ` ${participatingSparks.length} participating Spark${participatingSparks.length > 1 ? 's' : ''} will return to Lingering.` : ''}`,
+      'Complete & Clear Ember?',
+      `Completing "${seed.name || 'Untitled Ember'}" clears its active workspace record.${sparkNote}\n\nMake sure you have copied or shared the Completion Record if you wish to keep an external copy.`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'Keep Open', style: 'cancel' },
         {
-          text: 'Remove',
+          text: 'Complete & Clear',
           style: 'destructive',
           onPress: () => {
-            // Release participating Sparks to lingering
-            for (const spark of participatingSparks) {
-              saveSpark({ ...spark, status: 'lingering', emberId: undefined });
-            }
-            // Delete the EmberSeed
+            setShowCompleteModal(false);
             deleteEmber(id);
             onSparksChanged?.();
             if (onRemoved) {
               onRemoved();
               return;
             }
-            // Navigate away
+            router.replace('/');
+          },
+        },
+      ],
+    );
+  }, [seed, id, participatingSparks.length, onSparksChanged, onRemoved]);
+
+  // ── Delete Ember (Stage-Aware Deletion across all stages) ──
+  const handleRemove = useCallback(() => {
+    if (!seed || !id) return;
+
+    const summary = describeEmberDeletionSummary({
+      seed,
+      participatingSparks,
+      inquiryState,
+      hasDesignPack: Boolean(designPack),
+    });
+
+    Alert.alert(
+      'Delete Ember?',
+      summary.message,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Ember',
+          style: 'destructive',
+          onPress: () => {
+            deleteEmber(id);
+            onSparksChanged?.();
+            if (onRemoved) {
+              onRemoved();
+              return;
+            }
             router.replace('/');
           },
         },
@@ -633,6 +700,21 @@ export default function EmberViewScreen({
               </Text>
             </Pressable>
           )}
+
+          {/* 6. Complete Ember (prominent once Design Pack is generated) */}
+          {designPack && (
+            <Pressable
+              onPress={handleOpenCompleteModal}
+              style={[styles.developButton, styles.completeEmberMainButton]}
+            >
+              <Text style={styles.completeEmberMainText}>
+                Complete Ember
+              </Text>
+              <Text style={styles.developButtonHint}>
+                Conclude this Ember · inspect & copy completion record
+              </Text>
+            </Pressable>
+          )}
         </View>
 
         {/* ── Meta Footer ── */}
@@ -645,12 +727,20 @@ export default function EmberViewScreen({
           </Text>
         </View>
 
-        {/* ── Remove Ember ── */}
-        <Pressable onPress={handleRemove} style={styles.removeButton}>
-          <Text style={styles.removeButtonText}>
-            Remove Ember
-          </Text>
-        </Pressable>
+        {/* ── Lifecycle Actions: Complete or Delete Ember ── */}
+        <View style={styles.lifecycleFooter}>
+          <Pressable onPress={handleOpenCompleteModal} style={styles.completeFooterButton}>
+            <Text style={styles.completeFooterButtonText}>
+              Complete Ember
+            </Text>
+          </Pressable>
+
+          <Pressable onPress={handleRemove} style={styles.removeButton}>
+            <Text style={styles.removeButtonText}>
+              Delete Ember
+            </Text>
+          </Pressable>
+        </View>
       </ScrollView>
 
       {/* ── Contextual Quick Capture Modal ── */}
@@ -711,6 +801,86 @@ export default function EmberViewScreen({
               style={styles.pickerCloseBtn}
             >
               <Text style={styles.pickerCloseText}>Cancel</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ── Complete Ember Modal ── */}
+      <Modal
+        visible={showCompleteModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowCompleteModal(false)}
+      >
+        <Pressable
+          style={styles.modalOverlay}
+          onPress={() => setShowCompleteModal(false)}
+        >
+          <Pressable style={styles.completeSheet} onPress={() => {}}>
+            <Text style={styles.completeBadge}>COMPLETE EMBER</Text>
+            <Text style={styles.completeTitle} numberOfLines={1}>
+              {title}
+            </Text>
+            <Text style={styles.completeSubtitle}>
+              Assembled strictly from persisted material. Copy or share this record before completing and clearing the Ember from the active workspace.
+            </Text>
+
+            <ScrollView
+              style={styles.completeRecordScroll}
+              contentContainerStyle={styles.completeRecordContent}
+              showsVerticalScrollIndicator
+            >
+              <Text selectable style={styles.completeRecordText}>
+                {completionMarkdown}
+              </Text>
+            </ScrollView>
+
+            <View style={styles.completeExportRow}>
+              <Pressable
+                onPress={handleCopyCompletion}
+                style={[
+                  styles.completeExportBtn,
+                  copiedCompletion && styles.completeExportBtnCopied,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.completeExportBtnText,
+                    copiedCompletion && styles.completeExportBtnTextCopied,
+                  ]}
+                >
+                  {copiedCompletion ? '✓ Copied to Clipboard' : 'Copy Record'}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={handleShareCompletion}
+                style={styles.completeExportBtn}
+              >
+                <Text style={styles.completeExportBtnText}>Share Record</Text>
+              </Pressable>
+            </View>
+
+            <Pressable
+              onPress={handleConfirmCompleteAndClear}
+              style={styles.completeConfirmBtn}
+            >
+              <Text style={styles.completeConfirmBtnText}>
+                Complete & Clear from Workspace
+              </Text>
+              <Text style={styles.completeConfirmBtnHint}>
+                {participatingSparks.length > 0
+                  ? `${participatingSparks.length} participating Spark${participatingSparks.length === 1 ? '' : 's'} return${participatingSparks.length === 1 ? 's' : ''} to Lingering`
+                  : 'Removes active Ember record and returns to Embers'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setShowCompleteModal(false)}
+              style={styles.pickerCloseBtn}
+            >
+              <Text style={styles.pickerCloseText}>Keep Working on Ember</Text>
             </Pressable>
           </Pressable>
         </Pressable>
@@ -1097,18 +1267,146 @@ const styles = StyleSheet.create({
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
   },
 
-  // Remove
+  // Complete Ember (main progression button when Design Pack exists)
+  completeEmberMainButton: {
+    borderColor: 'rgba(255, 179, 71, 0.45)',
+    backgroundColor: 'rgba(255, 179, 71, 0.1)',
+  },
+  completeEmberMainText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '700',
+    color: COLORS.emberGold,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+
+  // Lifecycle footer (Complete or Delete Ember)
+  lifecycleFooter: {
+    marginTop: SPACING.xl,
+    marginBottom: SPACING.xl,
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  completeFooterButton: {
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 179, 71, 0.28)',
+    backgroundColor: 'rgba(255, 179, 71, 0.05)',
+  },
+  completeFooterButtonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.emberGold,
+    letterSpacing: 0.8,
+  },
   removeButton: {
     alignItems: 'center',
-    marginTop: SPACING.xl * 2,
-    marginBottom: SPACING.xl,
     paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
   },
   removeButtonText: {
     fontSize: 10,
     color: COLORS.textMuted,
     letterSpacing: 1,
-    opacity: 0.5,
+    opacity: 0.65,
+  },
+
+  // Complete Ember Modal Sheet
+  completeSheet: {
+    backgroundColor: '#171511',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#6B482E',
+    padding: SPACING.lg,
+    width: '100%',
+    maxWidth: 380,
+    maxHeight: '84%',
+    gap: SPACING.sm,
+  },
+  completeBadge: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.emberGold,
+    letterSpacing: 1.4,
+  },
+  completeTitle: {
+    fontSize: TYPOGRAPHY.sizes.md,
+    fontWeight: '600',
+    color: '#F5ECE0',
+  },
+  completeSubtitle: {
+    fontSize: 11,
+    color: '#8F7A65',
+    lineHeight: 16,
+  },
+  completeRecordScroll: {
+    maxHeight: 260,
+    backgroundColor: '#12110E',
+    borderWidth: 1,
+    borderColor: '#3A2B1E',
+    borderRadius: 8,
+    marginVertical: 4,
+  },
+  completeRecordContent: {
+    padding: SPACING.md,
+  },
+  completeRecordText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 11,
+    color: '#D8CFC2',
+    lineHeight: 17,
+  },
+  completeExportRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  completeExportBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.35)',
+    backgroundColor: 'rgba(255, 107, 43, 0.08)',
+  },
+  completeExportBtnCopied: {
+    borderColor: 'rgba(255, 179, 71, 0.6)',
+    backgroundColor: 'rgba(255, 179, 71, 0.14)',
+  },
+  completeExportBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
+  },
+  completeExportBtnTextCopied: {
+    color: COLORS.emberGold,
+  },
+  completeConfirmBtn: {
+    alignItems: 'center',
+    paddingVertical: SPACING.sm + 2,
+    paddingHorizontal: SPACING.md,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 179, 71, 0.45)',
+    backgroundColor: 'rgba(255, 179, 71, 0.12)',
+    marginTop: 2,
+    gap: 2,
+  },
+  completeConfirmBtnText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '700',
+    color: COLORS.emberGold,
+    letterSpacing: 0.4,
+  },
+  completeConfirmBtnHint: {
+    fontSize: 9,
+    color: '#A8947D',
+    fontStyle: 'italic',
   },
 
   // Picker Modal

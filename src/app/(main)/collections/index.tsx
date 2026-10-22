@@ -25,6 +25,7 @@ export interface CollectionsScreenProps {
   onCreateEmber?: () => void;
   selectedEmberId?: string | null;
   isFocused?: boolean;
+  refreshTrigger?: number;
 }
 
 export default function CollectionsScreen({
@@ -33,6 +34,7 @@ export default function CollectionsScreen({
   onCreateEmber,
   selectedEmberId = null,
   isFocused = true,
+  refreshTrigger = 0,
 }: CollectionsScreenProps = {}) {
   const [tab, setTab] = useState<'seeds' | 'projects'>('seeds');
   const [embers, setEmbers] = useState<EmberSeed[]>([]);
@@ -55,7 +57,7 @@ export default function CollectionsScreen({
     if (isFocused) {
       loadData();
     }
-  }, [isFocused, selectedEmberId, loadData]);
+  }, [isFocused, selectedEmberId, refreshTrigger, loadData]);
 
   // Group participating Sparks by Ember ID for collection card previews & counts
   const sparksByEmberId = useMemo(() => {

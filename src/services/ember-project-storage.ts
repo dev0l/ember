@@ -159,6 +159,49 @@ export function deleteProject(id: string): void {
   db.runSync(`DELETE FROM inquiries WHERE id = ?`, id);
 }
 
+/**
+ * Remove any persisted on-disk Design Pack Markdown files associated with an Ember's Inquiries.
+ * Called before deleting the Ember / Inquiry rows in SQLite so no orphaned files remain on disk.
+ */
+export function deleteDesignPackFilesForEmber(emberId: string): void {
+  const db = getDatabase();
+  const inquiries = db.getAllSync<{ id: string; design_pack_version: number }>(
+    `SELECT id, design_pack_version FROM inquiries WHERE ember_id = ?`,
+    emberId,
+  );
+
+  if (inquiries.length === 0) return;
+
+  const fileNames = new Set<string>();
+  for (const inq of inquiries) {
+    const recordedRows = db.getAllSync<{ file_name: string }>(
+      `SELECT file_name FROM design_packs WHERE inquiry_id = ?`,
+      inq.id,
+    );
+    for (const r of recordedRows) {
+      if (r.file_name) {
+        fileNames.add(r.file_name);
+      }
+    }
+    for (let v = 1; v <= inq.design_pack_version; v++) {
+      fileNames.add(designPackFileName(inq.id, v));
+    }
+  }
+
+  for (const fileName of fileNames) {
+    try {
+      const file = new File(PACKS_DIR, fileName);
+      if (file.exists) {
+        file.delete();
+      }
+    } catch (error) {
+      if (__DEV__) {
+        console.warn(`🔥 [DesignPack] Failed to delete file ${fileName}:`, error);
+      }
+    }
+  }
+}
+
 // ── Design Pack Storage ──────────────────────────
 // Design Pack markdown remains as files ({documentDir}/design-packs/
 // `${inquiryId}-v${version}.md`). Schema v3 adds a design_packs record per

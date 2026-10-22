@@ -13,6 +13,7 @@
 
 import type { EmberSeed, EmberSource } from '@/core/ember-types';
 import { serializeEmberMarkdown } from './ember-markdown';
+import { deleteDesignPackFilesForEmber } from './ember-project-storage';
 import { getDatabase } from './database';
 
 // ── Save ──
@@ -97,10 +98,17 @@ export function listEmbers(): EmberSeed[] {
 
 export function deleteEmber(id: string): void {
   const db = getDatabase();
-  // V2 schema has ON DELETE CASCADE for both spark_participations and inquiries,
-  // but explicit cleanup provides safety for any edge cases
-  db.runSync(`DELETE FROM spark_participations WHERE ember_id = ?`, id);
-  db.runSync(`DELETE FROM embers WHERE id = ?`, id);
+
+  // Remove any physical Design Pack Markdown files on disk before cascading SQLite rows
+  deleteDesignPackFilesForEmber(id);
+
+  // Atomically release participating Sparks back to Lingering and remove the Ember
+  // together with its Inquiry, answers, decisions, and Design Pack records.
+  db.withTransactionSync(() => {
+    db.runSync(`DELETE FROM spark_participations WHERE ember_id = ?`, id);
+    db.runSync(`DELETE FROM inquiries WHERE ember_id = ?`, id);
+    db.runSync(`DELETE FROM embers WHERE id = ?`, id);
+  });
 
   if (__DEV__) {
     console.log(`🔥 [Ember] Deleted: ${id}`);

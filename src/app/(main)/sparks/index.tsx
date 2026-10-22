@@ -28,7 +28,13 @@ import { createTextSpark } from '@/core/spark-types';
 import type { Spark } from '@/core/spark-types';
 import type { EmberSeed } from '@/core/ember-types';
 import { createEmberSeed } from '@/core/ember-types';
-import { saveSpark, listSparks, associateSparksWithEmber, deleteSpark } from '@/services/spark-storage';
+import {
+  saveSpark,
+  listSparks,
+  associateSparksWithEmber,
+  deleteSpark,
+  releaseSparkFromEmber,
+} from '@/services/spark-storage';
 import { saveEmber, loadEmber, listEmbers } from '@/services/ember-storage';
 import { loadProject } from '@/services/ember-project-storage';
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
@@ -213,6 +219,70 @@ export default function SparksScreen({
     );
   }, [sparks, selectedIds, sparkFilter, onSparksChanged]);
 
+  // ── Participating Spark Detail Actions (Open Ember / Release to Lingering / Delete Spark) ──
+  const handleOpenAssociatedEmber = useCallback(() => {
+    if (!detailSpark?.emberId) return;
+    const emberId = detailSpark.emberId;
+    setDetailSpark(null);
+    if (onOpenEmber) {
+      const seed = loadEmber(emberId) ?? undefined;
+      onOpenEmber(emberId, seed);
+      return;
+    }
+    router.replace(`/(main)/ember/${emberId}` as any);
+  }, [detailSpark, onOpenEmber]);
+
+  const handleReleaseParticipatingSpark = useCallback(() => {
+    if (!detailSpark) return;
+    const sparkToRelease = detailSpark;
+    const associatedEmberName =
+      (sparkToRelease.emberId && emberNames[sparkToRelease.emberId]) ||
+      'its associated Ember';
+
+    Alert.alert(
+      'Release Spark to Lingering?',
+      `Release "${sparkToRelease.title}" from "${associatedEmberName}"?\n\nNeither the Spark nor the Ember will be deleted — the Spark will return to Lingering Sparks.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Release',
+          onPress: () => {
+            releaseSparkFromEmber(sparkToRelease.id);
+            setDetailSpark(null);
+            loadData();
+            onSparksChanged?.();
+          },
+        },
+      ],
+    );
+  }, [detailSpark, emberNames, loadData, onSparksChanged]);
+
+  const handleDeleteParticipatingSpark = useCallback(() => {
+    if (!detailSpark) return;
+    const sparkToDelete = detailSpark;
+    const associatedEmberName =
+      (sparkToDelete.emberId && emberNames[sparkToDelete.emberId]) ||
+      'its associated Ember';
+
+    Alert.alert(
+      'Delete Participating Spark?',
+      `This Spark is currently participating in "${associatedEmberName}".\n\nPermanently delete "${sparkToDelete.title}" and remove it from "${associatedEmberName}"? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Spark',
+          style: 'destructive',
+          onPress: () => {
+            deleteSpark(sparkToDelete.id);
+            setDetailSpark(null);
+            loadData();
+            onSparksChanged?.();
+          },
+        },
+      ],
+    );
+  }, [detailSpark, emberNames, loadData, onSparksChanged]);
+
   const handleBack = useCallback(() => {
     if (router.canGoBack()) {
       router.back();
@@ -377,7 +447,7 @@ export default function SparksScreen({
         )}
       </KeyboardAvoidingView>
 
-      {/* ── Spark Detail Modal (read-only) ── */}
+      {/* ── Spark Detail & Participation Modal ── */}
       <Modal visible={!!detailSpark} transparent animationType="fade" onRequestClose={() => setDetailSpark(null)}>
         <Pressable
           style={styles.modalOverlay}
@@ -386,16 +456,56 @@ export default function SparksScreen({
           <Pressable style={styles.modalContent} onPress={() => {}}>
             {detailSpark && (
               <>
+                <View style={styles.modalHeaderRow}>
+                  <Text style={styles.modalStatusBadge}>• PARTICIPATING SPARK</Text>
+                  <Text style={styles.modalMeta}>
+                    {formatRelative(detailSpark.createdAt)}
+                  </Text>
+                </View>
+
                 <Text style={styles.modalTitle}>{detailSpark.title}</Text>
                 <Text style={styles.modalBody}>{detailSpark.content}</Text>
-                <Text style={styles.modalMeta}>
-                  Captured {formatRelative(detailSpark.createdAt)}
-                </Text>
-                {detailSpark.emberId && emberNames[detailSpark.emberId] && (
-                  <Text style={styles.modalRelation}>
-                    Participating in: {emberNames[detailSpark.emberId]}
-                  </Text>
+
+                {detailSpark.emberId && (
+                  <View style={styles.modalParticipationBox}>
+                    <View style={styles.modalParticipationInfo}>
+                      <Text style={styles.modalParticipationLabel}>PARTICIPATING IN</Text>
+                      <Text style={styles.modalRelation} numberOfLines={1}>
+                        {emberNames[detailSpark.emberId] || 'Associated Ember'}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={handleOpenAssociatedEmber}
+                      style={styles.openEmberPill}
+                    >
+                      <Text style={styles.openEmberPillText}>Open Ember →</Text>
+                    </Pressable>
+                  </View>
                 )}
+
+                <View style={styles.modalLifecycleActions}>
+                  <Pressable
+                    onPress={handleReleaseParticipatingSpark}
+                    style={styles.releaseSparkButton}
+                  >
+                    <Text style={styles.releaseSparkButtonTitle}>
+                      Release to Lingering
+                    </Text>
+                    <Text style={styles.releaseSparkButtonHint}>
+                      Detach from this Ember · keep both Spark and Ember
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={handleDeleteParticipatingSpark}
+                    style={styles.deleteParticipatingButton}
+                  >
+                    <Text style={styles.deleteParticipatingButtonText}>
+                      Delete Spark
+                    </Text>
+                  </Pressable>
+                </View>
+
                 <Pressable
                   onPress={() => setDetailSpark(null)}
                   style={styles.modalClose}
@@ -688,14 +798,26 @@ const styles = StyleSheet.create({
     padding: SPACING.lg,
   },
   modalContent: {
-    backgroundColor: COLORS.deepCharcoal,
+    backgroundColor: '#171511',
     borderRadius: 16,
     padding: SPACING.lg,
     width: '100%',
-    maxWidth: 340,
+    maxWidth: 360,
     gap: SPACING.sm,
     borderWidth: 1,
-    borderColor: 'rgba(255, 107, 43, 0.15)',
+    borderColor: '#5A4330',
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  modalStatusBadge: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1,
   },
   modalTitle: {
     fontSize: TYPOGRAPHY.sizes.md,
@@ -710,18 +832,86 @@ const styles = StyleSheet.create({
   modalMeta: {
     fontSize: 9,
     color: COLORS.textMuted,
-    marginTop: SPACING.xs,
+  },
+  modalParticipationBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#12110E',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.22)',
+    borderRadius: 10,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    marginTop: 4,
+    gap: SPACING.sm,
+  },
+  modalParticipationInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  modalParticipationLabel: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#8F7A65',
+    letterSpacing: 1,
   },
   modalRelation: {
     fontSize: TYPOGRAPHY.sizes.xs,
-    color: COLORS.emberOrange,
-    opacity: 0.8,
+    color: '#F5ECE0',
     fontWeight: '600',
+  },
+  openEmberPill: {
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 107, 43, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.3)',
+  },
+  openEmberPillText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.5,
+  },
+  modalLifecycleActions: {
+    gap: SPACING.xs,
+    marginTop: 4,
+  },
+  releaseSparkButton: {
+    backgroundColor: '#1E1B16',
+    borderWidth: 1,
+    borderColor: '#4A3727',
+    borderRadius: 10,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    gap: 2,
+  },
+  releaseSparkButtonTitle: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: '#F5ECE0',
+  },
+  releaseSparkButtonHint: {
+    fontSize: 10,
+    color: '#8F7A65',
+  },
+  deleteParticipatingButton: {
+    paddingVertical: SPACING.xs + 2,
+    alignItems: 'center',
+  },
+  deleteParticipatingButtonText: {
+    fontSize: 11,
+    color: '#D97757',
+    letterSpacing: 0.4,
   },
   modalClose: {
     alignItems: 'center',
     paddingVertical: SPACING.sm,
-    marginTop: SPACING.sm,
+    marginTop: 2,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 107, 43, 0.08)',
   },
