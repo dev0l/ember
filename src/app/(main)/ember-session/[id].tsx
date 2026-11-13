@@ -27,9 +27,11 @@ import {
   type TurboModule,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
+import type { EmberSeed } from '@/core';
+import type { Spark } from '@/core/spark-types';
 import {
   DEFAULT_LIBRARY,
   evaluateInquiry,
@@ -47,31 +49,51 @@ import {
   type Capability,
 } from '@/inquiry';
 import {
+  loadInquiryRow,
   loadInquiryEvidence,
   saveAnswer,
   recordDecision,
   resetUncommittedInquiry,
 } from '@/services/inquiry-storage';
+import { loadEmber } from '@/services/ember-storage';
+import { listSparks } from '@/services/spark-storage';
 import { loadLatestDesignPack } from '@/services/ember-project-storage';
+import {
+  resolveQuestionInputState,
+  updateQuestionDraft,
+  clearQuestionDraft,
+  clearInquiryDrafts,
+  findPrecedingAnsweredQuestionId,
+  resolveSessionBackStep,
+} from '@/services/inquiry-draft-store';
+import { EmberConstellationGlyph } from '@/components/plates/EmberConstellationGlyph';
 
 export interface EmberSessionScreenProps {
   inquiryId?: string;
   initialMovement?: Movement;
   hideHeader?: boolean;
+  isFocused?: boolean;
+  refreshTrigger?: number;
   onBack?: () => void;
   onMovementChange?: (movement: Movement) => void;
   onInvestigationStateChange?: (isInvestigating: boolean) => void;
+  onRegisterBackHandler?: (handler: (() => boolean) | null) => void;
   onCloseSession?: () => void;
+  onOpenDesignPack?: (inquiryId: string) => void;
 }
 
 export default function EmberSessionScreen({
   inquiryId: propInquiryId,
   initialMovement: propMovement,
   hideHeader = false,
+  isFocused = true,
+  refreshTrigger = 0,
   onBack,
   onMovementChange,
   onInvestigationStateChange,
+  onRegisterBackHandler,
   onCloseSession,
+  onOpenDesignPack,
 }: EmberSessionScreenProps = {}) {
   const params = useLocalSearchParams<{
     id: string;
@@ -82,11 +104,17 @@ export default function EmberSessionScreen({
   const initialMovement: Movement = propMovement || (params.movement as Movement) || 'explore';
   const [movement, setMovement] = useState<Movement>(initialMovement);
 
-  // Evidence and Engine State
+  // Evidence, Ember Seed, Participating Sparks, and Engine State
   const [evidence, setEvidence] = useState(() => (inquiryId ? loadInquiryEvidence(inquiryId) : { answers: [], decisions: [] }));
+  const [hasGeneratedPack, setHasGeneratedPack] = useState(() =>
+    inquiryId ? loadLatestDesignPack(inquiryId) !== null : false,
+  );
+  const [seed, setSeed] = useState<EmberSeed | null>(null);
+  const [participatingSparks, setParticipatingSparks] = useState<Spark[]>([]);
 
   // Guided Investigation state (targeted question resolution & user-chosen investigation)
   const [investigatingQuestionId, setInvestigatingQuestionId] = useState<string | null>(null);
+  const [revisitingPreviousQuestionId, setRevisitingPreviousQuestionId] = useState<string | null>(null);
   const [isInvestigating, setIsInvestigating] = useState(false);
 
   // Recognition Moment state when Investigation resolves blockers into configuration availability
@@ -95,38 +123,61 @@ export default function EmberSessionScreen({
 
   // Copy feedback for authored coverage boundary explanations
   const [copiedBoundaryKey, setCopiedBoundaryKey] = useState<string | null>(null);
+  const [showSourceDrawer, setShowSourceDrawer] = useState(false);
 
-  useEffect(() => {
-    if (inquiryId) {
-      setEvidence(loadInquiryEvidence(inquiryId));
-      setInvestigatingQuestionId(null);
-      setIsInvestigating(false);
-      setAwaitingAdoptionRecognition(false);
-      setAdoptionRecognized(false);
-      setCopiedBoundaryKey(null);
+  // Reload persisted Inquiry evidence, Ember seed, and participating Sparks
+  const refreshSessionData = useCallback(() => {
+    if (!inquiryId) return;
+    setEvidence(loadInquiryEvidence(inquiryId));
+    setHasGeneratedPack(loadLatestDesignPack(inquiryId) !== null);
+    const inqRow = loadInquiryRow(inquiryId);
+    if (inqRow?.emberId) {
+      setSeed(loadEmber(inqRow.emberId));
+      setParticipatingSparks(
+        listSparks('ember-associated').filter((s) => s.emberId === inqRow.emberId),
+      );
+    } else {
+      setSeed(null);
+      setParticipatingSparks([]);
     }
   }, [inquiryId]);
 
+  useFocusEffect(refreshSessionData);
+
   useEffect(() => {
-    if (propMovement) {
-      setMovement(propMovement);
+    if (inquiryId) {
+      refreshSessionData();
       setInvestigatingQuestionId(null);
+      setRevisitingPreviousQuestionId(null);
       setIsInvestigating(false);
       setAwaitingAdoptionRecognition(false);
       setAdoptionRecognized(false);
       setCopiedBoundaryKey(null);
     }
-  }, [propMovement]);
+  }, [inquiryId, refreshSessionData]);
+
+  useEffect(() => {
+    if (propMovement) {
+      refreshSessionData();
+      setMovement(propMovement);
+      setInvestigatingQuestionId(null);
+      setRevisitingPreviousQuestionId(null);
+      setIsInvestigating(false);
+      setAwaitingAdoptionRecognition(false);
+      setAdoptionRecognized(false);
+      setCopiedBoundaryKey(null);
+    }
+  }, [propMovement, refreshSessionData]);
+
+  useEffect(() => {
+    if (isFocused) {
+      refreshSessionData();
+    }
+  }, [isFocused, refreshTrigger, refreshSessionData]);
 
   const inquiryState: InquiryState = useMemo(() => {
     return evaluateInquiry(evidence, DEFAULT_LIBRARY);
   }, [evidence]);
-
-  // Release boundary: once the first Design Pack is generated, the Inquiry is complete for this release
-  const hasGeneratedPack = useMemo(() => {
-    if (!inquiryId) return false;
-    return loadLatestDesignPack(inquiryId) !== null;
-  }, [inquiryId, evidence]);
 
   const questionById = useMemo(() => {
     return new Map(DEFAULT_LIBRARY.questions.map((q) => [q.id, q]));
@@ -143,7 +194,36 @@ export default function EmberSessionScreen({
     return questionById.get(investigatingQuestionId);
   }, [investigatingQuestionId, questionById, hasGeneratedPack]);
 
-  const activeQuestion: InquiryQuestion | undefined = investigatingQuestion ?? nextUnansweredQuestion;
+  const revisitingQuestion: InquiryQuestion | undefined = useMemo(() => {
+    if (!revisitingPreviousQuestionId || hasGeneratedPack) return undefined;
+    return questionById.get(revisitingPreviousQuestionId);
+  }, [revisitingPreviousQuestionId, questionById, hasGeneratedPack]);
+
+  const activeQuestion: InquiryQuestion | undefined =
+    investigatingQuestion ?? revisitingQuestion ?? nextUnansweredQuestion;
+
+  // Bounded most-recent-answer fallback (single immediately preceding answered question in active movement)
+  const precedingQuestionId: string | undefined = useMemo(() => {
+    if (hasGeneratedPack || investigatingQuestion || revisitingQuestion) return undefined;
+    if (!nextUnansweredQuestion) return undefined;
+    return findPrecedingAnsweredQuestionId(
+      inquiryState.questions.map((q) => ({
+        id: q.id,
+        movement: q.movement,
+        applicable: q.applicable,
+        hasAnswer: q.answer !== undefined,
+      })),
+      movement,
+      nextUnansweredQuestion.id,
+    );
+  }, [
+    hasGeneratedPack,
+    investigatingQuestion,
+    revisitingQuestion,
+    nextUnansweredQuestion,
+    inquiryState.questions,
+    movement,
+  ]);
 
   const activeQuestionState: QuestionState | undefined = useMemo(() => {
     if (!activeQuestion) return undefined;
@@ -194,38 +274,121 @@ export default function EmberSessionScreen({
 
   useEffect(() => {
     onInvestigationStateChange?.(isScreenInvestigating);
-  }, [isScreenInvestigating, onInvestigationStateChange]);
+  }, [isScreenInvestigating, isFocused, refreshTrigger, onInvestigationStateChange]);
 
-  // Form input state
-  const [currentAnswer, setCurrentAnswer] = useState('');
-  const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
-  const [specificationText, setSpecificationText] = useState('');
+  const activeQuestionId = activeQuestion?.id;
+  const activeQuestionAnswerType = activeQuestion?.answerType;
+  const committedAnswerValue = activeQuestionState?.answer?.value;
+  const committedAnswerSpec = activeQuestionState?.answer?.specification;
 
-  // Synchronize inputs when activeQuestion changes
+  // Form input state (initialized from uncommitted draft or committed answer baseline)
+  const initialDraftState = resolveQuestionInputState(inquiryId, activeQuestionId, {
+    answerType: activeQuestionAnswerType,
+    committedValue: committedAnswerValue,
+    committedSpecification: committedAnswerSpec,
+  });
+  const [currentAnswer, setCurrentAnswer] = useState(initialDraftState.currentAnswer);
+  const [selectedChoice, setSelectedChoice] = useState<string | null>(
+    initialDraftState.selectedChoice,
+  );
+  const [specificationText, setSpecificationText] = useState(
+    initialDraftState.specificationText,
+  );
+
+  // Synchronize inputs when inquiryId, activeQuestion, or its committed answer changes,
+  // rehydrating any uncommitted draft input across unmount/remount or Ember switches.
   useEffect(() => {
-    if (activeQuestion) {
-      const existingAnswer = inquiryState.questions.find(q => q.id === activeQuestion.id)?.answer;
-      if (existingAnswer) {
-        if (activeQuestion.answerType === 'text') {
-          setCurrentAnswer(existingAnswer.value);
-        } else {
-          setSelectedChoice(existingAnswer.value);
-          setSpecificationText(existingAnswer.specification || '');
-        }
-      } else {
-        setCurrentAnswer('');
-        setSelectedChoice(null);
-        setSpecificationText('');
-      }
-    }
-  }, [activeQuestion, inquiryState.questions]);
+    if (!activeQuestionId) return;
+    const hydrated = resolveQuestionInputState(inquiryId, activeQuestionId, {
+      answerType: activeQuestionAnswerType,
+      committedValue: committedAnswerValue,
+      committedSpecification: committedAnswerSpec,
+    });
+    setCurrentAnswer(hydrated.currentAnswer);
+    setSelectedChoice(hydrated.selectedChoice);
+    setSpecificationText(hydrated.specificationText);
+  }, [
+    inquiryId,
+    activeQuestionId,
+    activeQuestionAnswerType,
+    committedAnswerValue,
+    committedAnswerSpec,
+  ]);
 
-  // Movement Available modal state
-  const [showMovements, setShowMovements] = useState(false);
+  const handleCurrentAnswerChange = useCallback(
+    (text: string) => {
+      setCurrentAnswer(text);
+      updateQuestionDraft(
+        inquiryId,
+        activeQuestionId,
+        { currentAnswer: text },
+        {
+          answerType: activeQuestionAnswerType,
+          committedValue: committedAnswerValue,
+          committedSpecification: committedAnswerSpec,
+        },
+      );
+    },
+    [
+      inquiryId,
+      activeQuestionId,
+      activeQuestionAnswerType,
+      committedAnswerValue,
+      committedAnswerSpec,
+    ],
+  );
+
+  const handleChoiceSelect = useCallback(
+    (choiceValue: string) => {
+      setSelectedChoice(choiceValue);
+      updateQuestionDraft(
+        inquiryId,
+        activeQuestionId,
+        { selectedChoice: choiceValue },
+        {
+          answerType: activeQuestionAnswerType,
+          committedValue: committedAnswerValue,
+          committedSpecification: committedAnswerSpec,
+        },
+      );
+    },
+    [
+      inquiryId,
+      activeQuestionId,
+      activeQuestionAnswerType,
+      committedAnswerValue,
+      committedAnswerSpec,
+    ],
+  );
+
+  const handleSpecificationChange = useCallback(
+    (text: string) => {
+      setSpecificationText(text);
+      updateQuestionDraft(
+        inquiryId,
+        activeQuestionId,
+        { specificationText: text },
+        {
+          answerType: activeQuestionAnswerType,
+          committedValue: committedAnswerValue,
+          committedSpecification: committedAnswerSpec,
+        },
+      );
+    },
+    [
+      inquiryId,
+      activeQuestionId,
+      activeQuestionAnswerType,
+      committedAnswerValue,
+      committedAnswerSpec,
+    ],
+  );
 
   // Guarded single return to Ember View
   const hasReturnedRef = useRef(false);
   const returnToEmber = useCallback(() => {
+    setInvestigatingQuestionId(null);
+    setRevisitingPreviousQuestionId(null);
     if (onBack) {
       onBack();
       return;
@@ -238,6 +401,41 @@ export default function EmberSessionScreen({
       router.replace('/');
     }
   }, [onBack]);
+
+  // Step-by-step inner back hierarchy (Investigating Question -> Previous Question Revisit -> User-Chosen Investigation -> Ember)
+  // Note: Ordinary Back/navigation is non-destructive and preserves uncommitted drafts.
+  const handleInternalBack = useCallback((): boolean => {
+    const step = resolveSessionBackStep({
+      investigatingQuestionId,
+      revisitingPreviousQuestionId,
+      isInvestigating,
+    });
+    if (!step.handled) return false;
+    setInvestigatingQuestionId(step.nextState.investigatingQuestionId);
+    setRevisitingPreviousQuestionId(step.nextState.revisitingPreviousQuestionId);
+    setIsInvestigating(step.nextState.isInvestigating);
+    return true;
+  }, [investigatingQuestionId, revisitingPreviousQuestionId, isInvestigating]);
+
+  // Explicit Cancel on a revisited or re-examined question discards the uncommitted revision
+  // and restores the committed answer baseline on any subsequent revisit.
+  const handleCancelQuestionRevision = useCallback(() => {
+    if (activeQuestionId) {
+      clearQuestionDraft(inquiryId, activeQuestionId);
+    }
+    if (investigatingQuestionId !== null) {
+      setInvestigatingQuestionId(null);
+    } else if (revisitingPreviousQuestionId !== null) {
+      setRevisitingPreviousQuestionId(null);
+    }
+  }, [inquiryId, activeQuestionId, investigatingQuestionId, revisitingPreviousQuestionId]);
+
+  useEffect(() => {
+    onRegisterBackHandler?.(handleInternalBack);
+    return () => {
+      onRegisterBackHandler?.(null);
+    };
+  }, [onRegisterBackHandler, handleInternalBack]);
 
   // Submit answer
   const handleAnswerSubmit = useCallback(() => {
@@ -258,6 +456,7 @@ export default function EmberSessionScreen({
       rawResponse: isChoice ? chosenChoice?.label : value,
       answeredAt: new Date().toISOString(),
     });
+    clearQuestionDraft(inquiryId, activeQuestion.id);
 
     // Refresh evidence
     const nextEvidence = loadInquiryEvidence(inquiryId);
@@ -270,9 +469,10 @@ export default function EmberSessionScreen({
       setAdoptionRecognized(false);
     }
 
-    // Clear targeted investigation question so any newly unlocked conditional
-    // questions flow forward via nextQuestion, or return to the threshold.
+    // Clear targeted investigation or previous-question revisit so any newly unlocked
+    // conditional questions flow forward via nextQuestion, or return to the threshold.
     setInvestigatingQuestionId(null);
+    setRevisitingPreviousQuestionId(null);
     setIsInvestigating(false);
 
     // Reset inputs
@@ -321,14 +521,14 @@ export default function EmberSessionScreen({
     }
   }, [inquiryId, inquiryState, returnToEmber]);
 
-  // Actionable crossing from Explore endpoint or Movement Available modal: choose Design Pack
+  // Actionable crossing from Explore endpoint: choose Design Pack
   const handleModalChooseDesignPack = useCallback(() => {
     const decision = chooseDesignPack(inquiryState, new Date().toISOString());
     if (decision) {
       recordDecision(inquiryId, decision);
       setEvidence(loadInquiryEvidence(inquiryId));
-      setShowMovements(false);
       setInvestigatingQuestionId(null);
+      setRevisitingPreviousQuestionId(null);
       setIsInvestigating(false);
       setMovement('develop');
       onMovementChange?.('develop');
@@ -349,6 +549,7 @@ export default function EmberSessionScreen({
           onPress: () => {
             const ok = resetUncommittedInquiry(inquiryId);
             if (ok) {
+              clearInquiryDrafts(inquiryId);
               if (onCloseSession) {
                 onCloseSession();
               } else {
@@ -458,10 +659,17 @@ export default function EmberSessionScreen({
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
       >
-        {/* Header bar */}
-        {!hideHeader && (
+        {/* Header bar (standalone) or Connected Sub-Plate Contextual Bar (embedded) */}
+        {!hideHeader ? (
           <View style={styles.headerBar}>
-            <Pressable onPress={returnToEmber} hitSlop={12}>
+            <Pressable
+              onPress={() => {
+                if (!handleInternalBack()) {
+                  returnToEmber();
+                }
+              }}
+              hitSlop={12}
+            >
               <Text style={styles.backArrow}>←</Text>
             </Pressable>
             <Text style={styles.headerTitle}>
@@ -475,37 +683,205 @@ export default function EmberSessionScreen({
               <Text style={styles.doneText}>Done</Text>
             </Pressable>
           </View>
+        ) : (
+          <View style={styles.embeddedSubBar}>
+            <Text style={styles.subBarContextLabel} numberOfLines={1}>
+              {activeQuestion
+                ? investigatingQuestion
+                  ? activeQuestionState?.disposition === 'unresolved'
+                    ? 'INVESTIGATING · OPEN DECISION'
+                    : 'INVESTIGATING · RE-EXAMINING SCOPE'
+                  : revisitingQuestion
+                  ? `${movement === 'explore' ? 'EXPLORE' : 'DEVELOP'} · REVISITING ANSWER`
+                  : `${movement === 'explore' ? 'EXPLORE' : 'DEVELOP'} · ${
+                      activeQuestion.role === 'optional' ? 'OPTIONAL' : 'REQUIRED'
+                    }`
+                : hasGeneratedPack
+                ? 'INQUIRY COMPLETE'
+                : isInvestigating
+                ? 'INVESTIGATING · RECORDED SCOPE'
+                : movement === 'develop' && inquiryState.designPack.chosen
+                ? inquiryState.designPack.blockers.length > 0
+                  ? unresolvedBlockers.length > 0
+                    ? 'INVESTIGATING · OPEN DECISIONS'
+                    : 'INVESTIGATING · COVERAGE BOUNDARY'
+                  : !inquiryState.designPack.adoptionValid
+                  ? inquiryState.designPack.canAdopt &&
+                    awaitingAdoptionRecognition &&
+                    !adoptionRecognized
+                    ? 'DEVELOP · COVERAGE REACHED'
+                    : 'DEVELOP · CONFIGURATION ADOPTION'
+                  : !inquiryState.designPack.reviewCurrent
+                  ? 'DEVELOP · SCOPE REVIEW'
+                  : 'DEVELOP · WARRANTED'
+                : 'EXPLORE · COMPLETE'}
+            </Text>
+
+            <View style={styles.subBarActions}>
+              {activeQuestion ? (
+                investigatingQuestion ? (
+                  <>
+                    <Pressable
+                      onPress={() => setInvestigatingQuestionId(null)}
+                      hitSlop={6}
+                      style={styles.subBarSecondaryPill}
+                    >
+                      <Text style={styles.subBarSecondaryText}>← Threshold</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleCancelQuestionRevision}
+                      hitSlop={6}
+                      style={styles.subBarSecondaryPill}
+                    >
+                      <Text style={styles.subBarSecondaryText}>Cancel</Text>
+                    </Pressable>
+                  </>
+                ) : revisitingQuestion ? (
+                  <Pressable
+                    onPress={handleCancelQuestionRevision}
+                    hitSlop={6}
+                    style={styles.subBarSecondaryPill}
+                  >
+                    <Text style={styles.subBarSecondaryText}>Cancel</Text>
+                  </Pressable>
+                ) : precedingQuestionId ? (
+                  <Pressable
+                    onPress={() => setRevisitingPreviousQuestionId(precedingQuestionId)}
+                    hitSlop={6}
+                    style={styles.subBarSecondaryPill}
+                  >
+                    <Text style={styles.subBarSecondaryText}>← Previous question</Text>
+                  </Pressable>
+                ) : null
+              ) : isInvestigating ? (
+                <Pressable
+                  onPress={() => setIsInvestigating(false)}
+                  hitSlop={6}
+                  style={styles.subBarSecondaryPill}
+                >
+                  <Text style={styles.subBarSecondaryText}>← Threshold</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
         )}
 
         <ScrollView
           contentContainerStyle={styles.phaseContent}
           keyboardShouldPersistTaps="handled"
         >
+          {/* ── Collapsible Source Constellation Drawer (Participating Sparks & Carried Sentence) ── */}
+          {(participatingSparks.length > 0 || Boolean(seed?.carriedSentence)) && (
+            <View style={styles.sourceDrawerContainer}>
+              <Pressable
+                onPress={() => setShowSourceDrawer((v) => !v)}
+                style={styles.sourceDrawerHeader}
+              >
+                <View style={styles.sourceDrawerLeft}>
+                  <EmberConstellationGlyph
+                    sparkCount={participatingSparks.length}
+                    stage={
+                      hasGeneratedPack
+                        ? 'pack'
+                        : inquiryState.designPack.generationAvailable
+                        ? 'warranted'
+                        : movement === 'develop'
+                        ? 'developing'
+                        : 'exploring'
+                    }
+                    size={26}
+                    animated={false}
+                  />
+                  <View style={styles.sourceDrawerTextCol}>
+                    <Text style={styles.sourceDrawerTitle} numberOfLines={1}>
+                      {seed?.name || 'Source Material'}
+                    </Text>
+                    <Text style={styles.sourceDrawerMeta}>
+                      ✦ {participatingSparks.length} participating spark
+                      {participatingSparks.length === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.sourceDrawerToggleText}>
+                  {showSourceDrawer ? 'HIDE ↑' : 'SPARKS ↓'}
+                </Text>
+              </Pressable>
+
+              {showSourceDrawer && (
+                <View style={styles.sourceDrawerBody}>
+                  {seed?.carriedSentence ? (
+                    <Text selectable style={styles.sourceDrawerEssence}>
+                      “{seed.carriedSentence}”
+                    </Text>
+                  ) : null}
+                  {participatingSparks.map((sp) => (
+                    <View key={sp.id} style={styles.sourceDrawerSparkRow}>
+                      <Text style={styles.sourceDrawerSparkGlyph}>✦</Text>
+                      <View style={styles.sourceDrawerSparkCol}>
+                        <Text selectable style={styles.sourceDrawerSparkTitle}>
+                          {sp.title}
+                        </Text>
+                        {sp.content.trim() !== sp.title.trim() && (
+                          <Text selectable style={styles.sourceDrawerSparkContent}>
+                            {sp.content}
+                          </Text>
+                        )}
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          )}
+
           {activeQuestion ? (
             <>
-              {/* Progress indicator */}
-              <View style={styles.progressRow}>
-                <Text style={styles.progressText}>
-                  {investigatingQuestion
-                    ? activeQuestionState?.disposition === 'unresolved'
-                      ? 'Investigating · Open Decision'
-                      : 'Investigating · Re-examining Scope'
-                    : movement === 'explore'
-                    ? activeQuestion.role === 'required'
-                      ? 'Explore · Foundation'
-                      : 'Explore · Optional'
-                    : 'Develop · Requirement'}
-                </Text>
-                {investigatingQuestion ? (
-                  <Pressable onPress={() => setInvestigatingQuestionId(null)} hitSlop={8}>
-                    <Text style={styles.cancelInvestigateText}>← Back to Threshold</Text>
-                  </Pressable>
-                ) : (
-                  <Text style={styles.progressCount}>
-                    {activeQuestion.role === 'optional' ? 'Optional' : 'Required'}
+              {/* Standalone progress indicator (embedded mode pins this in embeddedSubBar above) */}
+              {!hideHeader && (
+                <View style={styles.progressRow}>
+                  <Text style={styles.progressText}>
+                    {investigatingQuestion
+                      ? activeQuestionState?.disposition === 'unresolved'
+                        ? 'Investigating · Open Decision'
+                        : 'Investigating · Re-examining Scope'
+                      : revisitingQuestion
+                      ? `${movement === 'explore' ? 'Explore' : 'Develop'} · Revisiting Previous Answer`
+                      : movement === 'explore'
+                      ? activeQuestion.role === 'required'
+                        ? 'Explore · Foundation'
+                        : 'Explore · Optional'
+                      : 'Develop · Requirement'}
                   </Text>
-                )}
-              </View>
+                  {investigatingQuestion ? (
+                    <View style={styles.progressRightGroup}>
+                      <Pressable onPress={() => setInvestigatingQuestionId(null)} hitSlop={8}>
+                        <Text style={styles.cancelInvestigateText}>← Threshold</Text>
+                      </Pressable>
+                      <Pressable onPress={handleCancelQuestionRevision} hitSlop={8}>
+                        <Text style={styles.cancelInvestigateText}>Cancel</Text>
+                      </Pressable>
+                    </View>
+                  ) : revisitingQuestion ? (
+                    <Pressable onPress={handleCancelQuestionRevision} hitSlop={8}>
+                      <Text style={styles.cancelInvestigateText}>Cancel</Text>
+                    </Pressable>
+                  ) : (
+                    <View style={styles.progressRightGroup}>
+                      {precedingQuestionId && (
+                        <Pressable
+                          onPress={() => setRevisitingPreviousQuestionId(precedingQuestionId)}
+                          hitSlop={8}
+                        >
+                          <Text style={styles.previousQuestionText}>← Previous question</Text>
+                        </Pressable>
+                      )}
+                      <Text style={styles.progressCount}>
+                        {activeQuestion.role === 'optional' ? 'Optional' : 'Required'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              )}
 
               {/* Question text */}
               <Text style={styles.questionText}>
@@ -517,7 +893,7 @@ export default function EmberSessionScreen({
                 <TextInput
                   style={[styles.textInput, styles.multilineInput]}
                   value={currentAnswer}
-                  onChangeText={setCurrentAnswer}
+                  onChangeText={handleCurrentAnswerChange}
                   placeholder={activeQuestion.placeholder ?? 'Your thoughts...'}
                   placeholderTextColor={COLORS.textMuted}
                   multiline
@@ -529,7 +905,7 @@ export default function EmberSessionScreen({
                   {activeQuestion.choices?.map((choice) => (
                     <Pressable
                       key={choice.value}
-                      onPress={() => setSelectedChoice(choice.value)}
+                      onPress={() => handleChoiceSelect(choice.value)}
                       style={[
                         styles.choicePill,
                         selectedChoice === choice.value && styles.choicePillSelected,
@@ -553,7 +929,7 @@ export default function EmberSessionScreen({
                       <TextInput
                         style={styles.textInput}
                         value={specificationText}
-                        onChangeText={setSpecificationText}
+                        onChangeText={handleSpecificationChange}
                         placeholder="Name or details..."
                         placeholderTextColor={COLORS.textMuted}
                         autoFocus
@@ -585,7 +961,11 @@ export default function EmberSessionScreen({
                 }
               >
                 <Text style={styles.primaryButtonText}>
-                  {investigatingQuestion ? 'Save Resolution' : 'Save & Continue'}
+                  {investigatingQuestion
+                    ? 'Save Resolution'
+                    : revisitingQuestion
+                    ? 'Update & Continue'
+                    : 'Save & Continue'}
                 </Text>
               </Pressable>
             </>
@@ -596,8 +976,21 @@ export default function EmberSessionScreen({
               <Text style={styles.finishBody}>
                 A warranted Design Pack has been generated for this Inquiry. For this release, completed Inquiries remain preserved as recorded.
               </Text>
-              <Pressable onPress={returnToEmber} style={styles.primaryButton}>
-                <Text style={styles.primaryButtonText}>Return to Ember</Text>
+              {onOpenDesignPack && inquiryId && (
+                <Pressable
+                  onPress={() => onOpenDesignPack(inquiryId)}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>Open Design Pack</Text>
+                </Pressable>
+              )}
+              <Pressable
+                onPress={returnToEmber}
+                style={onOpenDesignPack ? [styles.secondaryButton, { marginTop: SPACING.sm }] : styles.primaryButton}
+              >
+                <Text style={onOpenDesignPack ? styles.secondaryButtonText : styles.primaryButtonText}>
+                  Return to Ember
+                </Text>
               </Pressable>
             </View>
           ) : isInvestigating ? (
@@ -906,10 +1299,6 @@ export default function EmberSessionScreen({
                       <Text style={styles.secondaryButtonText}>Continue Investigating</Text>
                     </Pressable>
 
-                    <Pressable onPress={returnToEmber} style={styles.tertiaryButton}>
-                      <Text style={styles.tertiaryButtonText}>Pause & Return to Ember</Text>
-                    </Pressable>
-
                     <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
                       <Text style={styles.declineButtonText}>Decline & Reset Inquiry</Text>
                     </Pressable>
@@ -953,6 +1342,14 @@ export default function EmberSessionScreen({
 
                   {/* Concise Scope Summary for Review */}
                   <View style={styles.scopeSummaryCard}>
+                    {seed?.name?.trim() && (
+                      <View style={styles.scopeSummaryRow}>
+                        <Text style={styles.scopeSummaryLabel}>EMBER</Text>
+                        <Text style={styles.scopeSummaryValue} numberOfLines={1}>
+                          {seed.name.trim()}
+                        </Text>
+                      </View>
+                    )}
                     {recordedPurpose && (
                       <View style={styles.scopeSummaryRow}>
                         <Text style={styles.scopeSummaryLabel}>PURPOSE</Text>
@@ -980,6 +1377,9 @@ export default function EmberSessionScreen({
                     <Text style={styles.scopeSummaryMeta}>
                       {inquiryState.designPack.requiredCapabilities.length} required capabilities covered ·{' '}
                       {inquiryState.questions.filter((q) => q.movement === 'develop' && q.applicable).length} technical decisions recorded
+                      {participatingSparks.length > 0
+                        ? ` · ${participatingSparks.length} participating spark${participatingSparks.length === 1 ? '' : 's'}`
+                        : ''}
                     </Text>
                   </View>
 
@@ -999,10 +1399,6 @@ export default function EmberSessionScreen({
                     style={[styles.secondaryButton, { marginTop: SPACING.sm }]}
                   >
                     <Text style={styles.secondaryButtonText}>Investigate Further</Text>
-                  </Pressable>
-
-                  <Pressable onPress={returnToEmber} style={styles.tertiaryButton}>
-                    <Text style={styles.tertiaryButtonText}>Pause & Return to Ember</Text>
                   </Pressable>
 
                   <Pressable onPress={handleDeclineAndReset} style={styles.declineButton}>
@@ -1063,132 +1459,6 @@ export default function EmberSessionScreen({
               )}
             </View>
           )}
-
-          {/* ── Movement Available Inspection Surface ── */}
-          {inquiryState.conditions.length > 0 && (
-            <Pressable
-              onPress={() => setShowMovements(true)}
-              style={styles.movementIndicator}
-            >
-              <Text style={styles.movementIndicatorText}>
-                {inquiryState.conditions.length} condition{inquiryState.conditions.length !== 1 ? 's' : ''} established
-              </Text>
-              <Text style={styles.movementIndicatorHint}>
-                {inquiryState.designPack.warranted
-                  ? 'Warranted · tap to inspect'
-                  : inquiryState.designPack.available
-                  ? 'Design Pack available · tap to inspect'
-                  : 'Tap to inspect progression'}
-              </Text>
-            </Pressable>
-          )}
-
-          {/* ── Movement Modal (Rebased onto InquiryState) ── */}
-          <Modal
-            visible={showMovements}
-            transparent
-            animationType="slide"
-            onRequestClose={() => setShowMovements(false)}
-          >
-            <View style={styles.movementOverlay}>
-              <View style={styles.movementModal}>
-                <ScrollView>
-                  <Text style={styles.movementTitle}>
-                    What has been established
-                  </Text>
-
-                  {/* Conditions section */}
-                  <View style={styles.movementSection}>
-                    <Text style={styles.movementSectionLabel}>
-                      Established Conditions ({inquiryState.conditions.length})
-                    </Text>
-                    {inquiryState.conditions.map((cond) => (
-                      <Text key={cond} style={styles.movementCondition}>
-                        ✓ {cond.replace(/-/g, ' ')}
-                      </Text>
-                    ))}
-                  </View>
-
-                  {/* Required capabilities */}
-                  {inquiryState.designPack.requiredCapabilities.length > 0 && (
-                    <View style={styles.movementSection}>
-                      <Text style={styles.movementSectionLabel}>
-                        Required Capabilities
-                      </Text>
-                      {inquiryState.designPack.requiredCapabilities.map((cap) => (
-                        <Text key={cap} style={styles.movementCondition}>
-                          • {CAPABILITY_LABELS[cap] ?? cap}
-                        </Text>
-                      ))}
-                    </View>
-                  )}
-
-                  {/* Blockers */}
-                  {inquiryState.designPack.blockers.length > 0 && (
-                    <View style={styles.movementSection}>
-                      <Text style={styles.movementSectionLabel}>
-                        Blockers
-                      </Text>
-                      {inquiryState.designPack.blockers.map((b, idx) => (
-                        <Text key={idx} selectable style={styles.movementConflict}>
-                          ⚠ {b.detail}
-                        </Text>
-                      ))}
-                    </View>
-                  )}
-
-                  {/* Available Movement */}
-                  <View style={[styles.movementSection, styles.movementDivider]}>
-                    <Text style={styles.movementSectionLabel}>
-                      Available Movements
-                    </Text>
-                    <View style={styles.movementItem}>
-                      <Text
-                        style={[
-                          styles.movementItemName,
-                          inquiryState.designPack.available && styles.movementItemAvailable,
-                        ]}
-                      >
-                        {inquiryState.designPack.available ? '◆' : '◇'} Design Pack
-                      </Text>
-                      <Text style={styles.movementItemHint}>
-                        {inquiryState.designPack.warranted
-                          ? 'Warranted for generation.'
-                          : inquiryState.designPack.chosen
-                          ? 'Chosen · developing technical requirements.'
-                          : inquiryState.designPack.available
-                          ? 'Available from established purpose and audience.'
-                          : 'Explore purpose and audience to make available.'}
-                      </Text>
-                    </View>
-
-                    {/* Actionable crossing inside modal */}
-                    {inquiryState.designPack.available && !inquiryState.designPack.chosen && (
-                      <Pressable
-                        onPress={handleModalChooseDesignPack}
-                        style={[styles.primaryButton, { marginTop: SPACING.md }]}
-                      >
-                        <Text style={styles.primaryButtonText}>
-                          Choose Design Pack & Begin Develop
-                        </Text>
-                      </Pressable>
-                    )}
-                  </View>
-
-                  <Text style={styles.movementFooter}>
-                    Truthful engine assessment from current evidence.
-                  </Text>
-                </ScrollView>
-
-                <Pressable
-                  onPress={() => setShowMovements(false)}
-                  style={styles.movementClose}
-                >
-                  <Text style={styles.movementCloseText}>Close</Text>
-                </Pressable>
-              </View>
-            </View>
-          </Modal>
         </ScrollView>
       </KeyboardAvoidingView>
     </Container>
@@ -1203,6 +1473,47 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+  },
+
+  // Connected sub-plate contextual bar
+  embeddedSubBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    backgroundColor: '#1A1713',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.14)',
+    gap: SPACING.sm,
+  },
+  subBarContextLabel: {
+    flex: 1,
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    letterSpacing: 1.2,
+  },
+  subBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  subBarSecondaryPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.05)',
+  },
+  subBarSecondaryText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    letterSpacing: 0.6,
   },
 
   // Header
@@ -1257,6 +1568,16 @@ const styles = StyleSheet.create({
   progressCount: {
     fontSize: 9,
     color: COLORS.textMuted,
+  },
+  progressRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  previousQuestionText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: COLORS.emberOrange,
   },
   cancelInvestigateText: {
     fontSize: 10,
@@ -1798,5 +2119,88 @@ const styles = StyleSheet.create({
     fontSize: TYPOGRAPHY.sizes.sm,
     color: COLORS.textSecondary,
     fontWeight: '500',
+  },
+  sourceDrawerContainer: {
+    width: '100%',
+    backgroundColor: '#161511',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 77, 0.18)',
+    borderRadius: 11,
+    marginBottom: SPACING.md,
+    overflow: 'hidden',
+  },
+  sourceDrawerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 10,
+  },
+  sourceDrawerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  sourceDrawerTextCol: {
+    flex: 1,
+    gap: 1,
+  },
+  sourceDrawerTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#F5ECE0',
+  },
+  sourceDrawerMeta: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    color: COLORS.emberGold,
+    letterSpacing: 0.6,
+  },
+  sourceDrawerToggleText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#BAA28A',
+    letterSpacing: 0.8,
+  },
+  sourceDrawerBody: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 184, 77, 0.12)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#12110E',
+    gap: 8,
+  },
+  sourceDrawerEssence: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#D8C2B0',
+    lineHeight: 17,
+  },
+  sourceDrawerSparkRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+  },
+  sourceDrawerSparkGlyph: {
+    fontSize: 9,
+    color: COLORS.emberGold,
+    marginTop: 3,
+  },
+  sourceDrawerSparkCol: {
+    flex: 1,
+    gap: 2,
+  },
+  sourceDrawerSparkTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
+  sourceDrawerSparkContent: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    lineHeight: 16,
   },
 });

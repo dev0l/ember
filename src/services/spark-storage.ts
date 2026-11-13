@@ -102,7 +102,10 @@ export function listSparks(
   );
 
   const sparks: Spark[] = [];
+  const seenIds = new Set<string>();
   for (const row of rows) {
+    if (seenIds.has(row.id)) continue;
+    seenIds.add(row.id);
     const derivedStatus = row.ember_id ? 'ember-associated' : 'lingering';
     if (!status || derivedStatus === status) {
       sparks.push(rowToSpark(row, row.ember_id ?? undefined));
@@ -133,20 +136,28 @@ export function associateSparksWithEmber(
   sparkIds: string[],
   emberId: string,
 ): void {
+  if (sparkIds.length === 0) return;
   const db = getDatabase();
   const now = new Date().toISOString();
 
-  for (const sparkId of sparkIds) {
-    // Application constraint: one participation per spark (for now).
-    // INSERT OR IGNORE prevents duplicates if already participating.
-    db.runSync(
-      `INSERT OR IGNORE INTO spark_participations (spark_id, ember_id, established_at)
-       VALUES (?, ?, ?)`,
-      sparkId,
-      emberId,
-      now,
-    );
-  }
+  // Application constraint: at most one Ember participation per Spark (RISK-01).
+  // Replace any prior participation row for each sparkId atomically so LEFT JOIN
+  // in listSparks() can never produce duplicate Spark entries.
+  db.withTransactionSync(() => {
+    for (const sparkId of sparkIds) {
+      db.runSync(
+        `DELETE FROM spark_participations WHERE spark_id = ?`,
+        sparkId,
+      );
+      db.runSync(
+        `INSERT INTO spark_participations (spark_id, ember_id, established_at)
+         VALUES (?, ?, ?)`,
+        sparkId,
+        emberId,
+        now,
+      );
+    }
+  });
 }
 
 // ── Helpers ──

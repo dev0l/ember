@@ -155,6 +155,10 @@ export default function EditEmberScreen({
   }, [onCancel, onDirtyChange]);
 
   const handleCancel = useCallback(() => {
+    if (hideHeader && onCancel) {
+      onCancel();
+      return;
+    }
     if (!isDirty) {
       discardAndExit();
       return;
@@ -171,7 +175,7 @@ export default function EditEmberScreen({
         },
       ],
     );
-  }, [isDirty, discardAndExit]);
+  }, [hideHeader, onCancel, isDirty, discardAndExit]);
 
   // Standalone Android hardware Back guard (when embedded, TerritoryStage handles BackHandler)
   useEffect(() => {
@@ -198,17 +202,33 @@ export default function EditEmberScreen({
   return (
     <Container style={styles.container}>
       {/* ── Header ── */}
-      <View style={styles.headerBar}>
-        <Pressable onPress={handleCancel} hitSlop={12}>
-          <Text style={styles.cancelText}>Cancel</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>Edit Ember</Text>
-        <Pressable onPress={handleSave} hitSlop={12}>
-          <Text style={styles.saveText}>Save</Text>
-        </Pressable>
-      </View>
+      {!hideHeader ? (
+        <>
+          <View style={styles.headerBar}>
+            <Pressable onPress={handleCancel} hitSlop={12}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </Pressable>
+            <Text style={styles.headerTitle}>Edit Ember</Text>
+            <Pressable onPress={handleSave} hitSlop={12}>
+              <Text style={styles.saveText}>Save</Text>
+            </Pressable>
+          </View>
 
-      <View style={styles.divider} />
+          <View style={styles.divider} />
+        </>
+      ) : (
+        <View style={styles.embeddedSubBar}>
+          <Text style={styles.subBarContextLabel}>EDITING EMBER</Text>
+          <View style={styles.subBarActions}>
+            <Pressable onPress={handleCancel} style={styles.subBarSecondaryPill}>
+              <Text style={styles.subBarSecondaryText}>Cancel</Text>
+            </Pressable>
+            <Pressable onPress={handleSave} style={styles.subBarPrimaryPill}>
+              <Text style={styles.subBarPrimaryText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
 
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -278,10 +298,16 @@ export default function EditEmberScreen({
             />
           </View>
 
-          {/* ── Save Button ── */}
+          {/* ── Save & Cancel Buttons ── */}
           <Pressable onPress={handleSave} style={styles.saveButton}>
             <Text style={styles.saveButtonText}>Save Changes</Text>
           </Pressable>
+
+          {!hideHeader && (
+            <Pressable onPress={handleCancel} style={styles.cancelButton}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </Pressable>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </Container>
@@ -304,6 +330,60 @@ const styles = StyleSheet.create({
   errorText: {
     fontSize: TYPOGRAPHY.sizes.md,
     color: COLORS.textSecondary,
+  },
+
+  // Connected sub-plate contextual bar
+  embeddedSubBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    backgroundColor: '#1A1713',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.14)',
+  },
+  subBarContextLabel: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    letterSpacing: 1.2,
+  },
+  subBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  subBarSecondaryPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.05)',
+  },
+  subBarSecondaryText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    letterSpacing: 0.6,
+  },
+  subBarPrimaryPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.emberOrange,
+    backgroundColor: 'rgba(255, 107, 43, 0.14)',
+  },
+  subBarPrimaryText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.6,
   },
 
   // Header
@@ -390,5 +470,16 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.deepCharcoal,
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
+  },
+  cancelButton: {
+    alignSelf: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    marginTop: SPACING.sm,
+  },
+  cancelButtonText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
   },
 });

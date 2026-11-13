@@ -18,9 +18,12 @@ export interface EmberPlateData {
   sparksCount?: number;
 }
 
+export type DevelopingPosture = 'inquiry' | 'design-pack';
+
 export interface DevelopingPlateData {
   inquiryId: string;
   movement: 'explore' | 'develop';
+  posture?: DevelopingPosture;
   title?: string;
 }
 

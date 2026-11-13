@@ -12,7 +12,7 @@
 // exposing the file itself.
 // ─────────────────────────────────────────────
 
-import type { EmberSeed, EmberNature, EmberSource } from '@/core/ember-types';
+import type { EmberSeed, EmberNature, EmberSource } from '../core/ember-types.ts';
 
 /**
  * Serializes an EmberSeed into a structured Markdown document.
@@ -85,9 +85,14 @@ export function parseEmberMarkdown(markdown: string): EmberSeed {
   const frontmatter = extractFrontmatter(markdown);
   const body = removeFrontmatter(markdown);
 
-  // Parse title from first H1
+  // Parse title from frontmatter first (preserves user-given names starting with "Untitled"),
+  // falling back to the first H1 when frontmatter.name is absent.
   const titleMatch = body.match(/^# (.+)$/m);
-  const name = titleMatch?.[1]?.trim();
+  const h1Name = titleMatch?.[1]?.trim();
+  const explicitFrontmatterName = frontmatter.name?.trim();
+  const resolvedName =
+    explicitFrontmatterName ||
+    (h1Name && !h1Name.startsWith('Untitled') ? h1Name : undefined);
 
   // Parse spark section
   const spark = extractSection(body, 'Spark');
@@ -130,7 +135,7 @@ export function parseEmberMarkdown(markdown: string): EmberSeed {
   return {
     id: frontmatter.id || 'unknown',
     nature: (frontmatter.nature as EmberNature) || 'open',
-    name: name && !name.startsWith('Untitled') ? name : undefined,
+    name: resolvedName,
     spark: spark || undefined,
     questions,
     carriedSentence,

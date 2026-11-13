@@ -3,19 +3,20 @@
 //
 // "The user may see the Markdown directly during this prototype."
 //
-// Loads a persisted Ember by ID and renders its Markdown content,
-// its Participating Sparks (with in-place Spark capture and
-// lingering Spark participation), and its Inquiry progression.
+// Loads a persisted Ember by ID and renders its Constellation
+// signature, Markdown content, Participating Sparks (with in-place
+// Spark capture, lingering Spark participation, and inline
+// release/delete confirmation), and Inquiry progression.
 // ─────────────────────────────────────────────
 
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
+  TextInput,
   ScrollView,
   Pressable,
   StyleSheet,
-  Alert,
   ActivityIndicator,
   Modal,
   FlatList,
@@ -35,7 +36,13 @@ import {
 import type { Spark } from '@/core/spark-types';
 import { loadEmber, deleteEmber } from '@/services/ember-storage';
 import { serializeEmberMarkdown } from '@/services/ember-markdown';
-import { listSparks, associateSparksWithEmber } from '@/services/spark-storage';
+import {
+  listSparks,
+  saveSpark,
+  associateSparksWithEmber,
+  releaseSparkFromEmber,
+  deleteSpark,
+} from '@/services/spark-storage';
 import {
   loadLatestDesignPack,
   saveDesignPack,
@@ -55,6 +62,10 @@ import {
   type InquiryState,
 } from '@/inquiry';
 import { QuickCaptureModal } from '@/components/sparks/QuickCaptureModal';
+import {
+  EmberConstellationGlyph,
+  type ConstellationStage,
+} from '@/components/plates/EmberConstellationGlyph';
 
 export { buildEmberOriginalMaterial };
 
@@ -65,6 +76,7 @@ export interface EmberViewScreenProps {
   onEdit?: () => void;
   onRemoved?: () => void;
   onOpenSession?: (inquiryId: string, movement: 'explore' | 'develop') => void;
+  onOpenDesignPack?: (inquiryId: string) => void;
   onCloseSession?: () => void;
   onSparksChanged?: () => void;
   refreshTrigger?: number;
@@ -78,6 +90,7 @@ export default function EmberViewScreen({
   onEdit,
   onRemoved,
   onOpenSession,
+  onOpenDesignPack,
   onCloseSession,
   onSparksChanged,
   refreshTrigger = 0,
@@ -103,26 +116,32 @@ export default function EmberViewScreen({
   const [showLingeringPicker, setShowLingeringPicker] = useState(false);
   const [lingeringSparks, setLingeringSparks] = useState<Spark[]>([]);
 
-  // Minimal Ember Completion modal state
+  // Minimal Ember Completion modal state + inline confirmation
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [copiedCompletion, setCopiedCompletion] = useState(false);
+  const [confirmingCompleteClear, setConfirmingCompleteClear] = useState(false);
 
-  // Reload data whenever id changes or screen comes into focus
+  // Inline stage-aware Delete Ember confirmation card
+  const [confirmingDeleteEmber, setConfirmingDeleteEmber] = useState(false);
+
+  // Participating Spark inspection, inline edit & inline release/delete modal state
+  const [inspectedSpark, setInspectedSpark] = useState<Spark | null>(null);
+  const [isEditingSpark, setIsEditingSpark] = useState(false);
+  const [editSparkTitle, setEditSparkTitle] = useState('');
+  const [editSparkContent, setEditSparkContent] = useState('');
+  const [sparkInlineConfirm, setSparkInlineConfirm] = useState<'release' | 'delete' | null>(null);
+  const [generationNotice, setGenerationNotice] = useState<string | null>(null);
+
   const loadData = useCallback(() => {
     if (!id) return;
     setLoading(true);
     const loadedSeed = loadEmber(id);
 
-    // Find Sparks that participate in this Ember
     const associated = listSparks('ember-associated')
       .filter((s) => s.emberId === id);
     setParticipatingSparks(associated);
 
     if (loadedSeed) {
-      // If a legacy Ember's `seed.spark` is identical to the joined content of its
-      // participating Sparks, omit the redundant `## Spark` markdown block so the
-      // thought is rendered once in Participating Sparks. If `seed.spark` holds
-      // distinct legacy text, keep it visible.
       const joinedAssociated = associated.map((s) => s.content.trim()).join('\n\n');
       const isDuplicateLegacySpark =
         Boolean(loadedSeed.spark?.trim()) &&
@@ -140,7 +159,6 @@ export default function EmberViewScreen({
       setMarkdown(null);
     }
 
-    // Ensure an Inquiry exists for this Ember and evaluate its engine state
     const inq = ensureInquiryForEmber(id, loadedSeed?.name);
     setInquiryInfo(inq);
 
@@ -148,7 +166,6 @@ export default function EmberViewScreen({
     const state = evaluateInquiry(evidence);
     setInquiryState(state);
 
-    // Load latest Design Pack if one exists
     const pack = loadLatestDesignPack(inq.id);
     if (pack) {
       const staleness = designPackStaleness(pack.record?.reviewFingerprint, state);
@@ -162,6 +179,8 @@ export default function EmberViewScreen({
       setDesignPack(null);
     }
 
+    setConfirmingDeleteEmber(false);
+    setGenerationNotice(null);
     setLoading(false);
   }, [id]);
 
@@ -171,7 +190,6 @@ export default function EmberViewScreen({
     loadData();
   }, [loadData, refreshTrigger]);
 
-  // Proactively reload when isFocused flips to true within the stage
   useEffect(() => {
     if (isFocused) {
       loadData();
@@ -228,6 +246,53 @@ export default function EmberViewScreen({
     [id, loadData, onSparksChanged],
   );
 
+  // ── Inspect, Edit, Release or Delete a Participating Spark ──
+  const openSparkInspector = useCallback((spark: Spark) => {
+    setInspectedSpark(spark);
+    setIsEditingSpark(false);
+    setEditSparkTitle(spark.title);
+    setEditSparkContent(spark.content);
+    setSparkInlineConfirm(null);
+  }, []);
+
+  const closeSparkInspector = useCallback(() => {
+    setInspectedSpark(null);
+    setIsEditingSpark(false);
+    setSparkInlineConfirm(null);
+  }, []);
+
+  const handleSaveInspectedSparkEdit = useCallback(() => {
+    if (!inspectedSpark || !editSparkContent.trim()) return;
+    const nextTitle =
+      editSparkTitle.trim() || editSparkContent.trim().split('\n')[0].slice(0, 48);
+    const updated: Spark = {
+      ...inspectedSpark,
+      title: nextTitle,
+      content: editSparkContent.trim(),
+    };
+    saveSpark(updated);
+    setInspectedSpark(updated);
+    setIsEditingSpark(false);
+    loadData();
+    onSparksChanged?.();
+  }, [inspectedSpark, editSparkTitle, editSparkContent, loadData, onSparksChanged]);
+
+  const executeReleaseInspectedSpark = useCallback(() => {
+    if (!inspectedSpark) return;
+    releaseSparkFromEmber(inspectedSpark.id);
+    closeSparkInspector();
+    loadData();
+    onSparksChanged?.();
+  }, [inspectedSpark, closeSparkInspector, loadData, onSparksChanged]);
+
+  const executeDeleteInspectedSpark = useCallback(() => {
+    if (!inspectedSpark) return;
+    deleteSpark(inspectedSpark.id);
+    closeSparkInspector();
+    loadData();
+    onSparksChanged?.();
+  }, [inspectedSpark, closeSparkInspector, loadData, onSparksChanged]);
+
   // ── Explore: deliberate entry into Explore movement ──
   const handleExplore = useCallback(() => {
     if (!inquiryInfo) return;
@@ -247,11 +312,9 @@ export default function EmberViewScreen({
     const decision = chooseDesignPack(inquiryState, new Date().toISOString());
     if (decision) {
       recordDecision(inquiryInfo.id, decision);
-      // Immediately evaluate and refresh state
       const evidence = loadInquiryEvidence(inquiryInfo.id);
       const updated = evaluateInquiry(evidence);
       setInquiryState(updated);
-      // Open session directly into Develop movement
       if (onOpenSession) {
         onOpenSession(inquiryInfo.id, 'develop');
         return;
@@ -276,23 +339,40 @@ export default function EmberViewScreen({
     } as any);
   }, [inquiryInfo, onOpenSession]);
 
-  // ── Generate Design Pack: available only when warranted (once per Inquiry in this release) ──
+  // ── Open Design Pack within TerritoryStage (or standalone fallback) ──
+  const handleViewDesignPack = useCallback(() => {
+    if (!inquiryInfo) return;
+    if (onOpenDesignPack) {
+      onOpenDesignPack(inquiryInfo.id);
+      return;
+    }
+    router.push({
+      pathname: '/(main)/design-pack/[id]',
+      params: { id: inquiryInfo.id },
+    } as any);
+  }, [inquiryInfo, onOpenDesignPack]);
+
+  // ── Generate Design Pack: available only when warranted ──
   const handleGenerateFromEmber = useCallback(() => {
     if (!inquiryInfo || !inquiryState || !seed || designPack) return;
+    const latestSeed = (id ? loadEmber(id) : null) ?? seed;
+    const latestSparks = id
+      ? listSparks('ember-associated').filter((s) => s.emberId === id)
+      : participatingSparks;
     const evidence = loadInquiryEvidence(inquiryInfo.id);
-    const originalMaterial = buildEmberOriginalMaterial(seed, participatingSparks);
+    const originalMaterial = buildEmberOriginalMaterial(latestSeed, latestSparks);
 
     const result = generateDesignPack(
       evidence,
       {
-        title: seed.name || 'Untitled Ember',
+        title: latestSeed.name || 'Untitled Ember',
         originalMaterial,
       },
       new Date().toISOString(),
     );
 
     if (!result.ok) {
-      Alert.alert('Generation refused', result.reason);
+      setGenerationNotice(result.reason);
       return;
     }
 
@@ -313,16 +393,29 @@ export default function EmberViewScreen({
         markdown: result.markdown,
         configurationId: result.state.designPack.adoptedConfigurationId!,
       });
+      if (onOpenDesignPack) {
+        onOpenDesignPack(inquiryInfo.id);
+        return;
+      }
       onCloseSession?.();
       router.push({
         pathname: '/(main)/design-pack/[id]',
         params: { id: inquiryInfo.id },
       } as any);
     } catch (error) {
-      Alert.alert('Generation failed', 'Something went wrong saving the Design Pack.');
+      setGenerationNotice('Something went wrong saving the Design Pack.');
       if (__DEV__) console.error('🔥 [Ember] Design Pack generation error:', error);
     }
-  }, [inquiryInfo, inquiryState, seed, participatingSparks, designPack, onCloseSession]);
+  }, [
+    id,
+    inquiryInfo,
+    inquiryState,
+    seed,
+    participatingSparks,
+    designPack,
+    onOpenDesignPack,
+    onCloseSession,
+  ]);
 
   // ── Assembled Completion Record (derived strictly from persisted material) ──
   const completionMarkdown = useMemo(() => {
@@ -343,6 +436,7 @@ export default function EmberViewScreen({
 
   const handleOpenCompleteModal = useCallback(() => {
     setCopiedCompletion(false);
+    setConfirmingCompleteClear(false);
     setShowCompleteModal(true);
   }, []);
 
@@ -363,7 +457,7 @@ export default function EmberViewScreen({
         message: completionMarkdown,
       });
     } catch {
-      Alert.alert('Copy Error', 'Could not copy the completion record.');
+      // Ignore cancellation
     }
   }, [completionMarkdown, seed]);
 
@@ -379,67 +473,41 @@ export default function EmberViewScreen({
     }
   }, [completionMarkdown, seed]);
 
-  const handleConfirmCompleteAndClear = useCallback(() => {
+  const executeCompleteAndClear = useCallback(() => {
     if (!seed || !id) return;
-    const sparkNote =
-      participatingSparks.length > 0
-        ? `\n\n${participatingSparks.length} participating Spark${participatingSparks.length === 1 ? '' : 's'} will return to Lingering Sparks.`
-        : '';
-    Alert.alert(
-      'Complete & Clear Ember?',
-      `Completing "${seed.name || 'Untitled Ember'}" clears its active workspace record.${sparkNote}\n\nMake sure you have copied or shared the Completion Record if you wish to keep an external copy.`,
-      [
-        { text: 'Keep Open', style: 'cancel' },
-        {
-          text: 'Complete & Clear',
-          style: 'destructive',
-          onPress: () => {
-            setShowCompleteModal(false);
-            deleteEmber(id);
-            onSparksChanged?.();
-            if (onRemoved) {
-              onRemoved();
-              return;
-            }
-            router.replace('/');
-          },
-        },
-      ],
-    );
-  }, [seed, id, participatingSparks.length, onSparksChanged, onRemoved]);
+    setShowCompleteModal(false);
+    setConfirmingCompleteClear(false);
+    deleteEmber(id);
+    onSparksChanged?.();
+    if (onRemoved) {
+      onRemoved();
+      return;
+    }
+    router.replace('/');
+  }, [seed, id, onSparksChanged, onRemoved]);
 
-  // ── Delete Ember (Stage-Aware Deletion across all stages) ──
-  const handleRemove = useCallback(() => {
-    if (!seed || !id) return;
-
-    const summary = describeEmberDeletionSummary({
+  // ── Stage-Aware Deletion Summary & Execution ──
+  const deletionSummary = useMemo(() => {
+    if (!seed) return null;
+    return describeEmberDeletionSummary({
       seed,
       participatingSparks,
       inquiryState,
       hasDesignPack: Boolean(designPack),
     });
+  }, [seed, participatingSparks, inquiryState, designPack]);
 
-    Alert.alert(
-      'Delete Ember?',
-      summary.message,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete Ember',
-          style: 'destructive',
-          onPress: () => {
-            deleteEmber(id);
-            onSparksChanged?.();
-            if (onRemoved) {
-              onRemoved();
-              return;
-            }
-            router.replace('/');
-          },
-        },
-      ],
-    );
-  }, [seed, id, inquiryState, designPack, participatingSparks, onSparksChanged, onRemoved]);
+  const executeDeleteEmber = useCallback(() => {
+    if (!seed || !id) return;
+    setConfirmingDeleteEmber(false);
+    deleteEmber(id);
+    onSparksChanged?.();
+    if (onRemoved) {
+      onRemoved();
+      return;
+    }
+    router.replace('/');
+  }, [seed, id, onSparksChanged, onRemoved]);
 
   const Container = hideHeader ? View : SafeAreaView;
 
@@ -467,11 +535,41 @@ export default function EmberViewScreen({
     );
   }
 
-  // Display title from seed
   const title = seed.name || `Untitled ${seed.nature.charAt(0).toUpperCase() + seed.nature.slice(1)}`;
-
-  // Remove frontmatter from display markdown
   const displayMarkdown = markdown.replace(/^---\n[\s\S]*?\n---\n*/, '');
+
+  let constellationStage: ConstellationStage = 'seed';
+  if (designPack) {
+    constellationStage = 'pack';
+  } else if (inquiryState?.designPack.generationAvailable) {
+    constellationStage = 'warranted';
+  } else if (inquiryState?.designPack.chosen) {
+    constellationStage = 'developing';
+  } else if (inquiryState && inquiryState.questions.some((q) => q.answer !== undefined)) {
+    constellationStage = 'exploring';
+  }
+
+  const postureHeadline = designPack
+    ? `DESIGN PACK v${designPack.version} · ${
+        designPack.staleness === 'stale' ? 'STALE' : 'CURRENT'
+      }`
+    : inquiryState?.designPack.generationAvailable
+    ? 'WARRANTED · READY TO GENERATE'
+    : inquiryState?.designPack.chosen
+    ? inquiryState.designPack.blockers.length > 0
+      ? `INVESTIGATING · ${inquiryState.designPack.blockers.length} BLOCKER${
+          inquiryState.designPack.blockers.length === 1 ? '' : 'S'
+        }`
+      : !inquiryState.designPack.adoptionValid
+      ? 'DEVELOP · CONFIGURATION AVAILABLE'
+      : !inquiryState.designPack.reviewCurrent
+      ? 'DEVELOP · SCOPE REVIEW'
+      : `DEVELOPING · ${inquiryState.designPack.outstanding.length} REMAINING`
+    : inquiryState?.designPack.available
+    ? 'EXPLORED · DESIGN PACK AVAILABLE'
+    : inquiryState && inquiryState.questions.some((q) => q.answer !== undefined)
+    ? 'EXPLORING · IN PROGRESS'
+    : 'EMBER · READY TO EXPLORE';
 
   return (
     <Container style={styles.container}>
@@ -495,28 +593,47 @@ export default function EmberViewScreen({
         </>
       ) : (
         <View style={styles.embeddedHeader}>
-          <Text style={styles.embeddedNature}>
-            {seed.nature ? seed.nature.toUpperCase() : 'EMBER'}
-            {participatingSparks.length > 0
-              ? ` · ${participatingSparks.length} SPARK${participatingSparks.length > 1 ? 'S' : ''}`
-              : ''}
+          <Text style={styles.embeddedNature} numberOfLines={1}>
+            {postureHeadline}
           </Text>
-          <Pressable onPress={handleEdit} hitSlop={12} style={styles.embeddedEditButton}>
-            <Text style={styles.embeddedEditText}>Edit Ember →</Text>
+          <Pressable onPress={handleEdit} hitSlop={8} style={styles.embeddedEditButton}>
+            <Text style={styles.embeddedEditText}>Edit Ember</Text>
           </Pressable>
         </View>
       )}
 
-      {/* ── Markdown Content ── */}
+      {/* ── Content Scroll ── */}
       <ScrollView
         style={styles.flex}
         contentContainerStyle={styles.contentContainer}
         showsVerticalScrollIndicator={false}
       >
+        {/* ── Living Constellation Signature & Lineage Banner ── */}
+        <View style={styles.constellationBanner}>
+          <EmberConstellationGlyph
+            sparkCount={participatingSparks.length}
+            stage={constellationStage}
+            size={56}
+            animated={isFocused}
+          />
+          <View style={styles.constellationBannerTextCol}>
+            <Text style={styles.constellationStageLabel}>{postureHeadline}</Text>
+            <Text style={styles.constellationMetaLine}>
+              ✦ {participatingSparks.length} participating spark
+              {participatingSparks.length === 1 ? '' : 's'}
+              {seed.questions.length > 0
+                ? ` · ${seed.questions.length} question${
+                    seed.questions.length === 1 ? '' : 's'
+                  }`
+                : ''}
+            </Text>
+          </View>
+        </View>
+
         {/* Render markdown as styled text blocks */}
         {renderMarkdownBlocks(displayMarkdown)}
 
-        {/* ── Participating Sparks ── */}
+        {/* ── Participating Sparks (Quiet Cards at Rest) ── */}
         <View style={styles.sparksSection}>
           <View style={styles.sparksSectionHeader}>
             <Text style={styles.sparksSectionTitle}>
@@ -526,17 +643,30 @@ export default function EmberViewScreen({
 
           {participatingSparks.length > 0 ? (
             participatingSparks.map((spark) => (
-              <View key={spark.id} style={styles.sparkItem}>
-                <Text style={styles.sparkItemTitle} numberOfLines={1}>
-                  {spark.title}
-                </Text>
-                <Text style={styles.sparkItemContent}>
-                  {spark.content}
-                </Text>
-                <Text style={styles.sparkItemDate}>
-                  {formatDate(spark.createdAt)}
-                </Text>
-              </View>
+              <Pressable
+                key={spark.id}
+                onPress={() => openSparkInspector(spark)}
+                onLongPress={() => openSparkInspector(spark)}
+                delayLongPress={240}
+                style={styles.sparkItem}
+              >
+                <View style={styles.sparkItemHeaderRow}>
+                  <View style={styles.sparkItemTitleGroup}>
+                    <Text style={styles.sparkItemGlyph}>✦</Text>
+                    <Text style={styles.sparkItemTitle} numberOfLines={1}>
+                      {spark.title}
+                    </Text>
+                  </View>
+                  <Text style={styles.sparkItemDate}>
+                    {formatDate(spark.createdAt)}
+                  </Text>
+                </View>
+                {spark.content.trim() !== spark.title.trim() && (
+                  <Text style={styles.sparkItemContent} numberOfLines={3}>
+                    {spark.content}
+                  </Text>
+                )}
+              </Pressable>
             ))
           ) : (
             <Text style={styles.emptySparksHint}>
@@ -564,6 +694,12 @@ export default function EmberViewScreen({
           )}
         </View>
 
+        {generationNotice && (
+          <View style={styles.inlineNoticeBox}>
+            <Text style={styles.inlineNoticeText}>{generationNotice}</Text>
+          </View>
+        )}
+
         {/* ── Inquiry Progression (Reconciled Movement Order: Explore → Develop → Generate) ── */}
         <View style={styles.developSection}>
           <View style={styles.developDivider} />
@@ -586,6 +722,13 @@ export default function EmberViewScreen({
                 </Text>
                 <Text style={styles.developButtonHint}>
                   Purpose established · optional questions available
+                </Text>
+              </Pressable>
+            ) : !designPack ? (
+              <Pressable onPress={handleExplore} style={styles.developButton}>
+                <Text style={styles.completedText}>✓ Explored</Text>
+                <Text style={styles.developButtonHint}>
+                  Purpose and audience established · tap to inspect
                 </Text>
               </Pressable>
             ) : (
@@ -684,10 +827,7 @@ export default function EmberViewScreen({
           {/* 5. View Design Pack */}
           {designPack && (
             <Pressable
-              onPress={() => router.push({
-                pathname: '/(main)/design-pack/[id]',
-                params: { id: inquiryInfo!.id },
-              } as any)}
+              onPress={handleViewDesignPack}
               style={styles.developButton}
             >
               <Text style={styles.completedText}>
@@ -727,19 +867,49 @@ export default function EmberViewScreen({
           </Text>
         </View>
 
-        {/* ── Lifecycle Actions: Complete or Delete Ember ── */}
+        {/* ── Lifecycle Actions: Complete or Inline Stage-Aware Delete Ember ── */}
         <View style={styles.lifecycleFooter}>
-          <Pressable onPress={handleOpenCompleteModal} style={styles.completeFooterButton}>
-            <Text style={styles.completeFooterButtonText}>
-              Complete Ember
-            </Text>
-          </Pressable>
+          {!designPack && (
+            <Pressable onPress={handleOpenCompleteModal} style={styles.completeFooterButton}>
+              <Text style={styles.completeFooterButtonText}>
+                Complete Ember
+              </Text>
+            </Pressable>
+          )}
 
-          <Pressable onPress={handleRemove} style={styles.removeButton}>
-            <Text style={styles.removeButtonText}>
-              Delete Ember
-            </Text>
-          </Pressable>
+          {!confirmingDeleteEmber ? (
+            <Pressable
+              onPress={() => setConfirmingDeleteEmber(true)}
+              style={styles.removeButton}
+            >
+              <Text style={styles.removeButtonText}>Delete Ember</Text>
+            </Pressable>
+          ) : (
+            <View style={styles.inlineDeleteEmberBox}>
+              <Text style={styles.inlineDeleteEmberTitle}>Delete this Ember?</Text>
+              {deletionSummary && (
+                <Text style={styles.inlineDeleteEmberBody}>
+                  {deletionSummary.message}
+                </Text>
+              )}
+              <View style={styles.inlineConfirmActions}>
+                <Pressable
+                  onPress={() => setConfirmingDeleteEmber(false)}
+                  style={styles.inlineCancelBtn}
+                >
+                  <Text style={styles.inlineCancelBtnText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={executeDeleteEmber}
+                  style={styles.inlineDangerConfirmBtn}
+                >
+                  <Text style={styles.inlineDangerConfirmBtnText}>
+                    Delete Ember
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
         </View>
       </ScrollView>
 
@@ -806,7 +976,188 @@ export default function EmberViewScreen({
         </Pressable>
       </Modal>
 
-      {/* ── Complete Ember Modal ── */}
+      {/* ── Participating Spark Inspection, Edit & Inline Confirmation Sheet ── */}
+      <Modal
+        visible={!!inspectedSpark}
+        transparent
+        animationType="fade"
+        onRequestClose={closeSparkInspector}
+      >
+        <Pressable
+          style={styles.modalOverlay}
+          onPress={closeSparkInspector}
+        >
+          <Pressable style={styles.pickerSheet} onPress={() => {}}>
+            {inspectedSpark && (
+              <>
+                <View style={styles.inspectorHeaderRow}>
+                  <Text style={styles.completeBadge}>✦ PARTICIPATING SPARK</Text>
+                  {!isEditingSpark && !designPack && (
+                    <Pressable
+                      onPress={() => {
+                        setIsEditingSpark(true);
+                        setSparkInlineConfirm(null);
+                      }}
+                      hitSlop={8}
+                      style={styles.inspectorEditPill}
+                    >
+                      <Text style={styles.inspectorEditPillText}>Edit</Text>
+                    </Pressable>
+                  )}
+                </View>
+
+                {isEditingSpark ? (
+                  <View style={styles.inspectorEditContainer}>
+                    <TextInput
+                      style={styles.inspectorTitleInput}
+                      value={editSparkTitle}
+                      onChangeText={setEditSparkTitle}
+                      placeholder="Spark title"
+                      placeholderTextColor={COLORS.textMuted}
+                    />
+                    <TextInput
+                      style={styles.inspectorContentInput}
+                      value={editSparkContent}
+                      onChangeText={setEditSparkContent}
+                      placeholder="Spark thought..."
+                      placeholderTextColor={COLORS.textMuted}
+                      multiline
+                      textAlignVertical="top"
+                    />
+                    <View style={styles.inlineConfirmActions}>
+                      <Pressable
+                        onPress={() => {
+                          setIsEditingSpark(false);
+                          setEditSparkTitle(inspectedSpark.title);
+                          setEditSparkContent(inspectedSpark.content);
+                        }}
+                        style={styles.inlineCancelBtn}
+                      >
+                        <Text style={styles.inlineCancelBtnText}>Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={handleSaveInspectedSparkEdit}
+                        style={styles.inlinePrimaryConfirmBtn}
+                      >
+                        <Text style={styles.inlinePrimaryConfirmBtnText}>
+                          Save Spark
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <>
+                    <Text selectable style={styles.pickerTitle}>
+                      {inspectedSpark.title}
+                    </Text>
+                    <Text style={styles.pickerSubtitle}>
+                      Captured {formatDate(inspectedSpark.createdAt)}
+                    </Text>
+
+                    <ScrollView
+                      style={styles.completeRecordScroll}
+                      contentContainerStyle={styles.completeRecordContent}
+                      showsVerticalScrollIndicator
+                    >
+                      <Text selectable style={styles.sparkItemContent}>
+                        {inspectedSpark.content}
+                      </Text>
+                    </ScrollView>
+
+                    {!designPack && (
+                      <>
+                        {sparkInlineConfirm === 'release' ? (
+                          <View style={styles.inlineWarmConfirmBox}>
+                            <Text style={styles.inlineWarmConfirmTitle}>
+                              Release back to Lingering Sparks?
+                            </Text>
+                            <Text style={styles.inlineWarmConfirmSub}>
+                              Detaches &ldquo;{inspectedSpark.title}&rdquo; from {title}. Neither is deleted.
+                            </Text>
+                            <View style={styles.inlineConfirmActions}>
+                              <Pressable
+                                onPress={() => setSparkInlineConfirm(null)}
+                                style={styles.inlineCancelBtn}
+                              >
+                                <Text style={styles.inlineCancelBtnText}>Cancel</Text>
+                              </Pressable>
+                              <Pressable
+                                onPress={executeReleaseInspectedSpark}
+                                style={styles.inlinePrimaryConfirmBtn}
+                              >
+                                <Text style={styles.inlinePrimaryConfirmBtnText}>
+                                  Release
+                                </Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        ) : sparkInlineConfirm === 'delete' ? (
+                          <View style={styles.inlineDeleteEmberBox}>
+                            <Text style={styles.inlineDeleteEmberTitle}>
+                              Delete Participating Spark?
+                            </Text>
+                            <Text style={styles.inlineDeleteEmberBody}>
+                              Permanently deletes &ldquo;{inspectedSpark.title}&rdquo; and removes it from {title}.
+                            </Text>
+                            <View style={styles.inlineConfirmActions}>
+                              <Pressable
+                                onPress={() => setSparkInlineConfirm(null)}
+                                style={styles.inlineCancelBtn}
+                              >
+                                <Text style={styles.inlineCancelBtnText}>Cancel</Text>
+                              </Pressable>
+                              <Pressable
+                                onPress={executeDeleteInspectedSpark}
+                                style={styles.inlineDangerConfirmBtn}
+                              >
+                                <Text style={styles.inlineDangerConfirmBtnText}>
+                                  Delete Spark
+                                </Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        ) : (
+                          <View style={styles.inspectedSparkActions}>
+                            <Pressable
+                              onPress={() => setSparkInlineConfirm('release')}
+                              style={styles.releaseInEmberBtn}
+                            >
+                              <Text style={styles.releaseInEmberBtnTitle}>
+                                Release to Lingering
+                              </Text>
+                              <Text style={styles.releaseInEmberBtnHint}>
+                                Detach from {title} · keep both Spark and Ember
+                              </Text>
+                            </Pressable>
+
+                            <Pressable
+                              onPress={() => setSparkInlineConfirm('delete')}
+                              style={styles.deleteInEmberBtn}
+                            >
+                              <Text style={styles.deleteInEmberBtnText}>
+                                Delete Spark
+                              </Text>
+                            </Pressable>
+                          </View>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+
+                <Pressable
+                  onPress={closeSparkInspector}
+                  style={styles.pickerCloseBtn}
+                >
+                  <Text style={styles.pickerCloseText}>Close</Text>
+                </Pressable>
+              </>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ── Complete Ember Modal (with Inline Confirmation) ── */}
       <Modal
         visible={showCompleteModal}
         transparent
@@ -818,7 +1169,7 @@ export default function EmberViewScreen({
           onPress={() => setShowCompleteModal(false)}
         >
           <Pressable style={styles.completeSheet} onPress={() => {}}>
-            <Text style={styles.completeBadge}>COMPLETE EMBER</Text>
+            <Text style={styles.completeBadge}>✦ COMPLETE EMBER</Text>
             <Text style={styles.completeTitle} numberOfLines={1}>
               {title}
             </Text>
@@ -862,19 +1213,50 @@ export default function EmberViewScreen({
               </Pressable>
             </View>
 
-            <Pressable
-              onPress={handleConfirmCompleteAndClear}
-              style={styles.completeConfirmBtn}
-            >
-              <Text style={styles.completeConfirmBtnText}>
-                Complete & Clear from Workspace
-              </Text>
-              <Text style={styles.completeConfirmBtnHint}>
-                {participatingSparks.length > 0
-                  ? `${participatingSparks.length} participating Spark${participatingSparks.length === 1 ? '' : 's'} return${participatingSparks.length === 1 ? 's' : ''} to Lingering`
-                  : 'Removes active Ember record and returns to Embers'}
-              </Text>
-            </Pressable>
+            {!confirmingCompleteClear ? (
+              <Pressable
+                onPress={() => setConfirmingCompleteClear(true)}
+                style={styles.completeConfirmBtn}
+              >
+                <Text style={styles.completeConfirmBtnText}>
+                  Complete & Clear from Workspace
+                </Text>
+                <Text style={styles.completeConfirmBtnHint}>
+                  {participatingSparks.length > 0
+                    ? `${participatingSparks.length} participating Spark${participatingSparks.length === 1 ? '' : 's'} return${participatingSparks.length === 1 ? 's' : ''} to Lingering`
+                    : 'Removes active Ember record and returns to Embers'}
+                </Text>
+              </Pressable>
+            ) : (
+              <View style={styles.inlineWarmConfirmBox}>
+                <Text style={styles.inlineWarmConfirmTitle}>
+                  Complete & Clear &ldquo;{title}&rdquo;?
+                </Text>
+                <Text style={styles.inlineWarmConfirmSub}>
+                  {participatingSparks.length > 0
+                    ? `Clears the active workspace record and returns ${participatingSparks.length} participating Spark${
+                        participatingSparks.length === 1 ? '' : 's'
+                      } to Lingering Sparks.`
+                    : 'Clears the active workspace record and returns to Embers.'}
+                </Text>
+                <View style={styles.inlineConfirmActions}>
+                  <Pressable
+                    onPress={() => setConfirmingCompleteClear(false)}
+                    style={styles.inlineCancelBtn}
+                  >
+                    <Text style={styles.inlineCancelBtnText}>Keep Open</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={executeCompleteAndClear}
+                    style={styles.inlinePrimaryConfirmBtn}
+                  >
+                    <Text style={styles.inlinePrimaryConfirmBtnText}>
+                      Complete & Clear
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
 
             <Pressable
               onPress={() => setShowCompleteModal(false)}
@@ -890,9 +1272,6 @@ export default function EmberViewScreen({
 }
 
 // ── Simple Markdown Renderer ────────────────
-// A lightweight block renderer for the prototype.
-// Not a full Markdown parser — just enough to make
-// the persisted document readable and warm.
 
 function renderMarkdownBlocks(markdown: string) {
   const lines = markdown.split('\n');
@@ -902,7 +1281,6 @@ function renderMarkdownBlocks(markdown: string) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // H1
     if (line.startsWith('# ')) {
       blocks.push(
         <Text key={key++} style={mdStyles.h1}>
@@ -912,7 +1290,6 @@ function renderMarkdownBlocks(markdown: string) {
       continue;
     }
 
-    // H2
     if (line.startsWith('## ')) {
       blocks.push(
         <Text key={key++} style={mdStyles.h2}>
@@ -922,7 +1299,11 @@ function renderMarkdownBlocks(markdown: string) {
       continue;
     }
 
-    // Blockquote
+    if (line.trim() === '>') {
+      blocks.push(<View key={key++} style={mdStyles.spacer} />);
+      continue;
+    }
+
     if (line.startsWith('> ')) {
       blocks.push(
         <View key={key++} style={mdStyles.blockquoteContainer}>
@@ -935,7 +1316,6 @@ function renderMarkdownBlocks(markdown: string) {
       continue;
     }
 
-    // List item
     if (line.startsWith('- ')) {
       blocks.push(
         <View key={key++} style={mdStyles.listItem}>
@@ -948,13 +1328,11 @@ function renderMarkdownBlocks(markdown: string) {
       continue;
     }
 
-    // Empty line — spacer
     if (line.trim() === '') {
       blocks.push(<View key={key++} style={mdStyles.spacer} />);
       continue;
     }
 
-    // Regular paragraph
     blocks.push(
       <Text key={key++} style={mdStyles.paragraph}>
         {renderInline(line)}
@@ -965,18 +1343,9 @@ function renderMarkdownBlocks(markdown: string) {
   return blocks;
 }
 
-/**
- * Renders inline formatting (bold, italic, links).
- * Very simple pattern matching for the prototype.
- */
 function renderInline(text: string): string {
-  // Strip markdown inline formatting for now — the text itself
-  // is the content we care about in the prototype.
-  // Remove bold markers
   let cleaned = text.replace(/\*\*(.+?)\*\*/g, '$1');
-  // Remove italic markers
   cleaned = cleaned.replace(/\*(.+?)\*/g, '$1');
-  // Simplify markdown links to display text
   cleaned = cleaned.replace(/\[(.+?)\]\(.+?\)/g, '$1');
   return cleaned;
 }
@@ -1068,24 +1437,31 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.sm,
+    backgroundColor: '#1A1713',
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 107, 43, 0.08)',
+    borderBottomColor: 'rgba(255, 107, 43, 0.14)',
   },
   embeddedNature: {
     fontFamily: TYPOGRAPHY.fonts.mono,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '700',
-    color: COLORS.emberOrange,
+    color: COLORS.textMuted,
     letterSpacing: 1.2,
   },
   embeddedEditButton: {
-    paddingVertical: 4,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.05)',
   },
   embeddedEditText: {
-    fontSize: 11,
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '600',
     color: COLORS.textSecondary,
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
   },
 
   // Divider
@@ -1098,8 +1474,38 @@ const styles = StyleSheet.create({
   // Content
   contentContainer: {
     paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.lg,
+    paddingTop: SPACING.md,
     paddingBottom: SPACING.xl * 3,
+  },
+
+  // Constellation Signature Banner
+  constellationBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 77, 0.16)',
+    backgroundColor: '#161511',
+    marginBottom: SPACING.sm,
+  },
+  constellationBannerTextCol: {
+    flex: 1,
+    gap: 3,
+  },
+  constellationStageLabel: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.emberGold,
+    letterSpacing: 1.1,
+  },
+  constellationMetaLine: {
+    fontSize: 11,
+    color: '#BAA28A',
+    letterSpacing: 0.3,
   },
 
   // Meta footer
@@ -1117,7 +1523,7 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
 
-  // Participating Sparks
+  // Participating Sparks (Quiet Cards)
   sparksSection: {
     marginTop: SPACING.xl,
     gap: SPACING.sm,
@@ -1128,6 +1534,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   sparksSectionTitle: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
     fontSize: 9,
     fontWeight: '700',
     color: COLORS.textMuted,
@@ -1140,17 +1547,68 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   sparkItem: {
-    backgroundColor: COLORS.surfaceDark,
-    borderRadius: 8,
-    padding: SPACING.md,
+    backgroundColor: '#161511',
+    borderRadius: 10,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 77, 0.14)',
     borderLeftWidth: 2,
-    borderLeftColor: 'rgba(255, 180, 100, 0.3)',
-    gap: 3,
+    borderLeftColor: 'rgba(255, 180, 100, 0.45)',
+    gap: 5,
+  },
+  sparkItemHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: SPACING.sm,
+  },
+  sparkItemTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    flex: 1,
+  },
+  sparkItemGlyph: {
+    fontSize: 10,
+    color: COLORS.emberGold,
   },
   sparkItemTitle: {
     fontSize: TYPOGRAPHY.sizes.sm,
     fontWeight: '600',
     color: COLORS.textPrimary,
+    flex: 1,
+  },
+  inspectedSparkActions: {
+    gap: SPACING.xs + 2,
+    marginTop: SPACING.sm,
+  },
+  releaseInEmberBtn: {
+    backgroundColor: '#1E1B16',
+    borderWidth: 1,
+    borderColor: '#4A3727',
+    borderRadius: 10,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    gap: 2,
+  },
+  releaseInEmberBtnTitle: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: '#F5ECE0',
+  },
+  releaseInEmberBtnHint: {
+    fontSize: 10,
+    color: '#8F7A65',
+  },
+  deleteInEmberBtn: {
+    paddingVertical: SPACING.xs + 2,
+    alignItems: 'center',
+  },
+  deleteInEmberBtnText: {
+    fontSize: 11,
+    color: '#D97757',
+    letterSpacing: 0.4,
   },
   sparkItemContent: {
     fontSize: TYPOGRAPHY.sizes.xs,
@@ -1171,7 +1629,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingVertical: 5,
+    paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 14,
     borderWidth: 1,
@@ -1189,7 +1647,7 @@ const styles = StyleSheet.create({
     color: COLORS.emberOrange,
   },
   bringInEmberBtn: {
-    paddingVertical: 5,
+    paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 14,
     borderWidth: 1,
@@ -1199,6 +1657,18 @@ const styles = StyleSheet.create({
   bringInEmberText: {
     fontSize: 11,
     color: COLORS.textSecondary,
+  },
+  inlineNoticeBox: {
+    marginTop: SPACING.md,
+    padding: SPACING.md,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(217, 119, 87, 0.4)',
+    backgroundColor: '#241411',
+  },
+  inlineNoticeText: {
+    fontSize: 12,
+    color: '#FFD8CE',
   },
 
   // Develop further (bridge)
@@ -1255,7 +1725,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // Generate button (slightly different emphasis)
+  // Generate button
   generateButton: {
     borderColor: 'rgba(255, 107, 43, 0.4)',
     backgroundColor: 'rgba(255, 107, 43, 0.1)',
@@ -1279,12 +1749,13 @@ const styles = StyleSheet.create({
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
   },
 
-  // Lifecycle footer (Complete or Delete Ember)
+  // Lifecycle footer (Complete or Inline Delete Ember)
   lifecycleFooter: {
     marginTop: SPACING.xl,
     marginBottom: SPACING.xl,
     alignItems: 'center',
     gap: SPACING.sm,
+    width: '100%',
   },
   completeFooterButton: {
     alignItems: 'center',
@@ -1311,6 +1782,142 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     letterSpacing: 1,
     opacity: 0.65,
+  },
+
+  // Inline Confirmation Boxes (Replacing OS Alert.alert)
+  inlineDeleteEmberBox: {
+    width: '100%',
+    backgroundColor: '#241411',
+    borderWidth: 1,
+    borderColor: 'rgba(229, 124, 98, 0.45)',
+    borderRadius: 12,
+    padding: SPACING.md,
+    gap: 8,
+    marginTop: 6,
+  },
+  inlineDeleteEmberTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFD8CE',
+  },
+  inlineDeleteEmberBody: {
+    fontSize: 11,
+    color: '#D8C2B0',
+    lineHeight: 16,
+  },
+  inlineWarmConfirmBox: {
+    width: '100%',
+    backgroundColor: '#1E1812',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 77, 0.4)',
+    borderRadius: 10,
+    padding: SPACING.md,
+    gap: 6,
+    marginTop: 6,
+  },
+  inlineWarmConfirmTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#F5ECE0',
+  },
+  inlineWarmConfirmSub: {
+    fontSize: 11,
+    color: '#C4B19B',
+    lineHeight: 16,
+  },
+  inlineConfirmActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  inlineCancelBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#5A4330',
+    backgroundColor: '#171511',
+  },
+  inlineCancelBtnText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#C4B19B',
+  },
+  inlineDangerConfirmBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#C84B31',
+  },
+  inlineDangerConfirmBtnText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FFF5E6',
+  },
+  inlinePrimaryConfirmBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: COLORS.emberOrange,
+  },
+  inlinePrimaryConfirmBtnText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.deepCharcoal,
+  },
+
+  // Inspector Edit Styles
+  inspectorHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  inspectorEditPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.3)',
+    backgroundColor: 'rgba(255, 107, 43, 0.08)',
+  },
+  inspectorEditPillText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+  },
+  inspectorEditContainer: {
+    gap: SPACING.sm,
+    marginVertical: 4,
+  },
+  inspectorTitleInput: {
+    backgroundColor: '#12110E',
+    borderWidth: 1,
+    borderColor: '#4A3727',
+    borderRadius: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 8,
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
+  inspectorContentInput: {
+    backgroundColor: '#12110E',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.3)',
+    borderRadius: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 10,
+    fontSize: TYPOGRAPHY.sizes.sm,
+    color: COLORS.textPrimary,
+    minHeight: 92,
+    maxHeight: 160,
   },
 
   // Complete Ember Modal Sheet
@@ -1343,7 +1950,7 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   completeRecordScroll: {
-    maxHeight: 260,
+    maxHeight: 240,
     backgroundColor: '#12110E',
     borderWidth: 1,
     borderColor: '#3A2B1E',
@@ -1412,7 +2019,7 @@ const styles = StyleSheet.create({
   // Picker Modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    backgroundColor: 'rgba(0, 0, 0, 0.74)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: SPACING.lg,
@@ -1424,8 +2031,8 @@ const styles = StyleSheet.create({
     borderColor: '#6B482E',
     padding: SPACING.lg,
     width: '100%',
-    maxWidth: 360,
-    maxHeight: '72%',
+    maxWidth: 368,
+    maxHeight: '78%',
   },
   pickerTitle: {
     fontSize: TYPOGRAPHY.sizes.md,
@@ -1496,7 +2103,7 @@ const mdStyles = StyleSheet.create({
     color: COLORS.emberOrange,
     letterSpacing: TYPOGRAPHY.letterSpacing.extraWide,
     marginBottom: SPACING.sm,
-    marginTop: SPACING.md,
+    marginTop: SPACING.xs,
   },
   h2: {
     fontSize: 14,

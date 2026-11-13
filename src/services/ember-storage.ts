@@ -15,6 +15,7 @@ import type { EmberSeed, EmberSource } from '@/core/ember-types';
 import { serializeEmberMarkdown } from './ember-markdown';
 import { deleteDesignPackFilesForEmber } from './ember-project-storage';
 import { getDatabase } from './database';
+import { clearInquiryDrafts } from './inquiry-draft-store';
 
 // ── Save ──
 
@@ -51,6 +52,15 @@ export function saveEmber(seed: EmberSeed): string {
     JSON.stringify(updated.sources),
     updated.createdAt,
     updated.updatedAt,
+  );
+
+  // Keep any associated Inquiry row's name synchronized when an Ember is named or renamed (DEFECT-03)
+  const resolvedName = updated.name?.trim() || 'Untitled Ember';
+  db.runSync(
+    `UPDATE inquiries SET name = ?, updated_at = ? WHERE ember_id = ?`,
+    resolvedName,
+    updated.updatedAt,
+    updated.id,
   );
 
   if (__DEV__) {
@@ -104,11 +114,18 @@ export function deleteEmber(id: string): void {
 
   // Atomically release participating Sparks back to Lingering and remove the Ember
   // together with its Inquiry, answers, decisions, and Design Pack records.
+  const inquiryRows = db.getAllSync<{ id: string }>(
+    `SELECT id FROM inquiries WHERE ember_id = ?`,
+    id,
+  );
   db.withTransactionSync(() => {
     db.runSync(`DELETE FROM spark_participations WHERE ember_id = ?`, id);
     db.runSync(`DELETE FROM inquiries WHERE ember_id = ?`, id);
     db.runSync(`DELETE FROM embers WHERE id = ?`, id);
   });
+  for (const inq of inquiryRows) {
+    clearInquiryDrafts(inq.id);
+  }
 
   if (__DEV__) {
     console.log(`🔥 [Ember] Deleted: ${id}`);

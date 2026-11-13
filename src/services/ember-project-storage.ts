@@ -27,6 +27,7 @@ import type {
 import { QUESTION_LIBRARY } from '@/knowledge/questions';
 import { evaluatePropositions } from '@/knowledge/propositions';
 import { getDatabase } from './database';
+import { clearInquiryDrafts } from './inquiry-draft-store';
 
 const PACKS_DIR = new Directory(Paths.document, 'design-packs');
 
@@ -157,6 +158,7 @@ export function deleteProject(id: string): void {
   const db = getDatabase();
   // CASCADE will remove inquiry_answers rows
   db.runSync(`DELETE FROM inquiries WHERE id = ?`, id);
+  clearInquiryDrafts(id);
 }
 
 /**
@@ -330,6 +332,10 @@ export function saveDesignPack(
     console.warn(
       `🔥 [DesignPack] ${fileName} written without a record — no Inquiry ${inquiryId}`,
     );
+  }
+
+  if (recorded) {
+    clearInquiryDrafts(inquiryId);
   }
 
   return file.uri;

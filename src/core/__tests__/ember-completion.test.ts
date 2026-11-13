@@ -15,8 +15,10 @@ import {
   chooseDesignPack,
   adoptConfiguration,
   confirmReview,
+  nextQuestion,
 } from '../../inquiry/evaluate.ts';
-import type { CommittedAnswer, InquiryDecision } from '../../inquiry/types.ts';
+import { generateDesignPack } from '../../inquiry/generate.ts';
+import type { CommittedAnswer, InquiryDecision, InquiryEvidence } from '../../inquiry/types.ts';
 
 function makeSeed(overrides?: Partial<EmberSeed>): EmberSeed {
   return {
@@ -236,5 +238,97 @@ describe('Ember Lifecycle — buildEmberCompletionRecord', () => {
     assert.match(record, /Warranted & Review Confirmed/);
     assert.match(record, /## Generated Design Pack \(v1\)/);
     assert.match(record, /Persisted pack body\./);
+  });
+});
+
+describe('P1 — Cross-Surface Session Freshness & Design Pack Material Sync', () => {
+  test('Explore to Develop transition: refreshing evidence after chooseDesignPack yields q-reach instead of stale undefined', () => {
+    const exploreAnswers: CommittedAnswer[] = [
+      { questionId: 'q-purpose', value: 'Offline botanical field journal', answeredAt: '2026-10-27T10:00:00Z' },
+      { questionId: 'q-audience', value: 'Solo botanists on multi-day hikes', answeredAt: '2026-10-27T10:01:00Z' },
+    ];
+
+    // Stale mounted session state before consequence decision is loaded
+    const staleEvidence: InquiryEvidence = { answers: exploreAnswers, decisions: [] };
+    const staleState = evaluateInquiry(staleEvidence);
+    assert.equal(staleState.designPack.available, true);
+    assert.equal(staleState.designPack.chosen, false);
+    assert.equal(nextQuestion(staleState, 'develop'), undefined);
+
+    // Consequence chosen on EmberViewScreen and reloaded on movement/focus refresh
+    const decision = chooseDesignPack(staleState, '2026-10-27T10:02:00Z');
+    assert.ok(decision);
+    const refreshedEvidence: InquiryEvidence = {
+      answers: exploreAnswers,
+      decisions: [decision],
+    };
+    const refreshedState = evaluateInquiry(refreshedEvidence);
+    assert.equal(refreshedState.designPack.chosen, true);
+    assert.equal(refreshedState.designPack.developing, true);
+    assert.equal(nextQuestion(refreshedState, 'develop')?.id, 'q-reach');
+  });
+
+  test('Mid-session Ember rename and newly attached participating Sparks flow into generated Design Pack when refreshed', () => {
+    const initialSeed = makeSeed({
+      name: 'Initial Working Title',
+      spark: 'First trail note from morning walk.',
+    });
+    const initialSparks: Spark[] = [];
+
+    // Mid-session edits on EmberViewScreen / Spark participation
+    const refreshedSeed: EmberSeed = {
+      ...initialSeed,
+      name: 'Canopy Microclimate Logger',
+      updatedAt: '2026-10-27T11:00:00.000Z',
+    };
+    const refreshedSparks: Spark[] = [
+      makeSpark(
+        'sp-new-1',
+        'Canopy Sensor Note',
+        'Pair handheld readings with bark moisture sketches.',
+      ),
+    ];
+
+    const answers: CommittedAnswer[] = [
+      { questionId: 'q-purpose', value: 'Log microclimate observations under forest canopy.', answeredAt: '2026-10-27T10:01:00Z' },
+      { questionId: 'q-audience', value: 'Field ecologists.', answeredAt: '2026-10-27T10:02:00Z' },
+      { questionId: 'q-reach', value: 'personal', answeredAt: '2026-10-27T10:03:00Z' },
+      { questionId: 'q-platform', value: 'mobile', answeredAt: '2026-10-27T10:04:00Z' },
+      { questionId: 'q-persistence', value: 'no', answeredAt: '2026-10-27T10:05:00Z' },
+      { questionId: 'q-data-location', value: 'device', answeredAt: '2026-10-27T10:06:00Z' },
+      { questionId: 'q-external-deps', value: 'none', answeredAt: '2026-10-27T10:07:00Z' },
+      { questionId: 'q-offline', value: 'yes', answeredAt: '2026-10-27T10:08:00Z' },
+      { questionId: 'q-accounts', value: 'none', answeredAt: '2026-10-27T10:09:00Z' },
+      { questionId: 'q-constraints', value: 'none', answeredAt: '2026-10-27T10:10:00Z' },
+    ];
+
+    const decisions: InquiryDecision[] = [];
+    let state = evaluateInquiry({ answers, decisions });
+    decisions.push(chooseDesignPack(state, '2026-10-27T10:11:00Z')!);
+    state = evaluateInquiry({ answers, decisions });
+    decisions.push(adoptConfiguration(state, 'cfg-mobile-session', '2026-10-27T10:12:00Z')!);
+    state = evaluateInquiry({ answers, decisions });
+    decisions.push(confirmReview(state, '2026-10-27T10:13:00Z')!);
+
+    const evidence: InquiryEvidence = { answers, decisions };
+    const refreshedMaterial = buildEmberOriginalMaterial(refreshedSeed, refreshedSparks);
+    assert.ok(refreshedMaterial);
+    assert.notEqual(
+      refreshedMaterial,
+      buildEmberOriginalMaterial(initialSeed, initialSparks),
+    );
+
+    const gen = generateDesignPack(
+      evidence,
+      { title: refreshedSeed.name ?? 'Untitled Ember', originalMaterial: refreshedMaterial },
+      '2026-10-27T11:05:00Z',
+    );
+    assert.equal(gen.ok, true);
+    if (!gen.ok) return;
+
+    assert.match(gen.markdown, /# Design Pack — Canopy Microclimate Logger/);
+    assert.doesNotMatch(gen.markdown, /Initial Working Title/);
+    assert.match(gen.markdown, /First trail note from morning walk\./);
+    assert.match(gen.markdown, /Pair handheld readings with bark moisture sketches\./);
   });
 });

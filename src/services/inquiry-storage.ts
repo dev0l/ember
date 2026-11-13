@@ -15,6 +15,7 @@
 
 import type { DecisionKind, InquiryDecision, CommittedAnswer, InquiryEvidence } from '@/inquiry';
 import { getDatabase } from './database';
+import { clearQuestionDraft, clearInquiryDrafts } from './inquiry-draft-store';
 
 interface DecisionRow {
   id: number;
@@ -132,6 +133,9 @@ export function saveAnswer(
     now,
     inquiryId,
   );
+
+  // Committing an answer supersedes any uncommitted draft for this question
+  clearQuestionDraft(inquiryId, questionId);
 }
 
 /**
@@ -180,6 +184,15 @@ export function ensureInquiryForEmber(emberId: string, emberName?: string): { id
     emberId,
   );
   if (existing) {
+    const trimmed = emberName?.trim();
+    if (trimmed && trimmed !== existing.name) {
+      db.runSync(
+        `UPDATE inquiries SET name = ? WHERE id = ?`,
+        trimmed,
+        existing.id,
+      );
+      return { id: existing.id, emberId: existing.ember_id, name: trimmed };
+    }
     return { id: existing.id, emberId: existing.ember_id, name: existing.name };
   }
 
@@ -243,6 +256,8 @@ export function resetUncommittedInquiry(inquiryId: string): boolean {
     db.runSync(`DELETE FROM inquiries WHERE id = ?`, inquiryId);
     deleted = true;
   });
+  if (deleted) {
+    clearInquiryDrafts(inquiryId);
+  }
   return deleted;
 }
-

@@ -1,13 +1,15 @@
 // ─────────────────────────────────────────────
-// Design Pack View
+// Design Pack Use Screen
 //
 // "The Markdown is for Ember to communicate."
 //
-// Displays the generated Design Pack Markdown with
-// warm styling and engine provenance metadata.
+// Displays the generated Design Pack Markdown within the spatial
+// continuity of TerritoryStage (or standalone fallback), with a
+// reading & use posture supporting selectable text, one-tap clipboard
+// copy, native sharing, and engine provenance metadata.
 // ─────────────────────────────────────────────
 
-import { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -15,12 +17,15 @@ import {
   Pressable,
   StyleSheet,
   Share,
+  TurboModuleRegistry,
+  type TurboModule,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import {
+  loadEmber,
   loadInquiryRow,
   loadInquiryEvidence,
   loadLatestDesignPack,
@@ -31,43 +36,103 @@ import {
   designPackStaleness,
 } from '@/inquiry';
 
-export default function DesignPackViewScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export interface DesignPackViewScreenProps {
+  inquiryId?: string;
+  emberTitle?: string;
+  hideHeader?: boolean;
+  isFocused?: boolean;
+  refreshTrigger?: number;
+  onBack?: () => void;
+}
+
+export default function DesignPackViewScreen({
+  inquiryId: propInquiryId,
+  emberTitle: propEmberTitle,
+  hideHeader = false,
+  isFocused = true,
+  refreshTrigger = 0,
+  onBack,
+}: DesignPackViewScreenProps = {}) {
+  const params = useLocalSearchParams<{ id: string }>();
+  const id = propInquiryId || params.id;
+
   const [inquiry, setInquiry] = useState<{ id: string; emberId: string | null; name: string } | null>(null);
+  const [resolvedEmberName, setResolvedEmberName] = useState<string | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const [record, setRecord] = useState<DesignPackRecord | null>(null);
   const [staleness, setStaleness] = useState<'current' | 'stale' | 'unknown'>('unknown');
+  const [copiedPack, setCopiedPack] = useState(false);
 
-  useFocusEffect(
-    useCallback(() => {
-      if (!id) return;
-      const inq = loadInquiryRow(id);
-      setInquiry(inq);
+  const loadData = useCallback(() => {
+    if (!id) return;
+    const inq = loadInquiryRow(id);
+    setInquiry(inq);
 
-      const evidence = loadInquiryEvidence(id);
-      const state = evaluateInquiry(evidence);
+    if (inq?.emberId) {
+      const seed = loadEmber(inq.emberId);
+      setResolvedEmberName(seed?.name?.trim() || inq.name || null);
+    } else {
+      setResolvedEmberName(inq?.name || null);
+    }
 
-      const pack = loadLatestDesignPack(id);
-      if (pack) {
-        setMarkdown(pack.markdown);
-        setVersion(pack.version);
-        setRecord(pack.record);
-        setStaleness(designPackStaleness(pack.record?.reviewFingerprint, state));
-      } else {
-        setMarkdown(null);
-        setVersion(0);
-        setRecord(null);
-        setStaleness('unknown');
+    const evidence = loadInquiryEvidence(id);
+    const state = evaluateInquiry(evidence);
+
+    const pack = loadLatestDesignPack(id);
+    if (pack) {
+      setMarkdown(pack.markdown);
+      setVersion(pack.version);
+      setRecord(pack.record);
+      setStaleness(designPackStaleness(pack.record?.reviewFingerprint, state));
+    } else {
+      setMarkdown(null);
+      setVersion(0);
+      setRecord(null);
+      setStaleness('unknown');
+    }
+  }, [id]);
+
+  useFocusEffect(loadData);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData, refreshTrigger]);
+
+  useEffect(() => {
+    if (isFocused) {
+      loadData();
+    }
+  }, [isFocused, loadData]);
+
+  const displayTitle = propEmberTitle || resolvedEmberName || inquiry?.name || 'Ember';
+
+  const handleCopy = useCallback(async () => {
+    if (!markdown) return;
+    try {
+      const nativeClipboard = TurboModuleRegistry.get<
+        TurboModule & { setString?: (content: string) => void }
+      >('Clipboard');
+      if (nativeClipboard && typeof nativeClipboard.setString === 'function') {
+        nativeClipboard.setString(markdown);
+        setCopiedPack(true);
+        setTimeout(() => setCopiedPack(false), 2400);
+        return;
       }
-    }, [id]),
-  );
+      await Share.share({
+        title: `Design Pack - ${displayTitle}`,
+        message: markdown,
+      });
+    } catch {
+      // Ignore cancellation or clipboard fallback errors
+    }
+  }, [markdown, displayTitle]);
 
   const handleExport = useCallback(async () => {
     if (!markdown) return;
     try {
       await Share.share({
-        title: inquiry?.name ? `Design Pack - ${inquiry.name}` : 'Ember Design Pack',
+        title: `Design Pack - ${displayTitle}`,
         message: markdown,
       });
     } catch (error) {
@@ -75,76 +140,103 @@ export default function DesignPackViewScreen() {
         console.error('🔥 [Ember] Share error:', error);
       }
     }
-  }, [markdown, inquiry?.name]);
-
-  const handleEmber = useCallback(() => {
-    if (!id) return;
-    if (inquiry?.emberId) {
-      if (router.canGoBack()) {
-        router.back();
-      } else {
-        router.replace(`/(main)/ember/${inquiry.emberId}` as any);
-      }
-    } else {
-      if (router.canGoBack()) {
-        router.back();
-      } else {
-        router.replace('/');
-      }
-    }
-  }, [id, inquiry?.emberId]);
+  }, [markdown, displayTitle]);
 
   const handleBack = useCallback(() => {
+    if (onBack) {
+      onBack();
+      return;
+    }
     if (router.canGoBack()) {
       router.back();
     } else if (inquiry?.emberId) {
-      router.replace(`/(main)/ember/${inquiry.emberId}` as any);
+      router.replace({
+        pathname: '/',
+        params: { openEmberId: inquiry.emberId },
+      } as any);
     } else {
       router.replace('/');
     }
-  }, [inquiry?.emberId]);
+  }, [onBack, inquiry?.emberId]);
+
+  const Container = hideHeader ? View : SafeAreaView;
 
   if (!markdown) {
     return (
-      <SafeAreaView style={styles.container}>
+      <Container style={styles.container}>
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyText}>
             No Design Pack generated yet.
           </Text>
           <Pressable onPress={handleBack} style={styles.backButton}>
-            <Text style={styles.backButtonText}>Go back</Text>
+            <Text style={styles.backButtonText}>Return to Ember</Text>
           </Pressable>
         </View>
-      </SafeAreaView>
+      </Container>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* ── Header ── */}
-      <View style={styles.header}>
-        <Pressable onPress={handleBack} hitSlop={12}>
-          <Text style={styles.backArrow}>←</Text>
-        </Pressable>
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerLabel}>DESIGN PACK</Text>
-          <Text style={styles.headerName} numberOfLines={1}>
-            {inquiry?.name ?? 'Ember'}
-          </Text>
+    <Container style={styles.container}>
+      {/* ── Header / Embedded Use Bar ── */}
+      {!hideHeader ? (
+        <>
+          <View style={styles.header}>
+            <Pressable onPress={handleBack} hitSlop={12}>
+              <Text style={styles.backArrow}>←</Text>
+            </Pressable>
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerLabel}>DESIGN PACK</Text>
+              <Text style={styles.headerName} numberOfLines={1}>
+                {displayTitle}
+              </Text>
+            </View>
+            <View style={styles.headerActions}>
+              <Pressable onPress={handleCopy} hitSlop={10} style={styles.headerActionBtn}>
+                <Text style={styles.copyText}>
+                  {copiedPack ? '✓ Copied' : 'Copy'}
+                </Text>
+              </Pressable>
+              <Pressable onPress={handleExport} hitSlop={10} style={styles.headerActionBtn}>
+                <Text style={styles.shareText}>Share</Text>
+              </Pressable>
+              <Pressable onPress={handleBack} hitSlop={10} style={styles.headerActionBtn}>
+                <Text style={styles.enquiryText}>Ember</Text>
+              </Pressable>
+            </View>
+          </View>
+          <View style={styles.divider} />
+        </>
+      ) : (
+        <View style={styles.embeddedUseBar}>
+          <View style={styles.embeddedMetaGroup}>
+            <Text style={styles.embeddedBadge}>
+              PACK v{version} · {staleness === 'stale' ? 'STALE' : 'CURRENT'}
+            </Text>
+            {record?.configurationId && (
+              <Text style={styles.embeddedConfigLabel} numberOfLines={1}>
+                {record.configurationId}
+              </Text>
+            )}
+          </View>
+          <View style={styles.embeddedActions}>
+            <Pressable
+              onPress={handleCopy}
+              hitSlop={8}
+              style={[styles.usePill, copiedPack && styles.usePillCopied]}
+            >
+              <Text style={[styles.usePillText, copiedPack && styles.usePillTextCopied]}>
+                {copiedPack ? '✓ Copied' : 'Copy Pack'}
+              </Text>
+            </Pressable>
+            <Pressable onPress={handleExport} hitSlop={8} style={styles.usePillSecondary}>
+              <Text style={styles.usePillSecondaryText}>Share</Text>
+            </Pressable>
+          </View>
         </View>
-        <View style={styles.headerActions}>
-          <Pressable onPress={handleExport} hitSlop={12} style={styles.headerActionBtn}>
-            <Text style={styles.shareText}>Share</Text>
-          </Pressable>
-          <Pressable onPress={handleEmber} hitSlop={12} style={styles.headerActionBtn}>
-            <Text style={styles.enquiryText}>Ember</Text>
-          </Pressable>
-        </View>
-      </View>
+      )}
 
-      <View style={styles.divider} />
-
-      {/* ── Markdown Content ── */}
+      {/* ── Markdown Content (Selectable Long-Form Reader) ── */}
       <ScrollView
         style={styles.flex}
         contentContainerStyle={styles.scrollContent}
@@ -153,7 +245,7 @@ export default function DesignPackViewScreen() {
         {staleness === 'stale' && (
           <View style={styles.staleBanner}>
             <Text style={styles.staleBannerTitle}>STALE DESIGN PACK</Text>
-            <Text style={styles.staleBannerText}>
+            <Text selectable style={styles.staleBannerText}>
               Inquiry evidence has changed since this pack was generated. Return to Ember to review or generate a new pack when warranted.
             </Text>
           </View>
@@ -163,99 +255,190 @@ export default function DesignPackViewScreen() {
 
         {/* ── Footer ── */}
         <View style={styles.metaFooter}>
-          <Pressable onPress={handleExport} style={styles.exportButtonLarge}>
-            <Text style={styles.exportButtonLargeText}>Share Design Pack</Text>
-            <Text style={styles.exportButtonLargeHint}>Export persisted Markdown</Text>
-          </Pressable>
+          {!hideHeader && (
+            <View style={styles.footerActionsRow}>
+              <Pressable onPress={handleCopy} style={styles.copyButtonLarge}>
+                <Text style={styles.copyButtonLargeText}>
+                  {copiedPack ? '✓ Copied to Clipboard' : 'Copy Design Pack'}
+                </Text>
+                <Text style={styles.exportButtonLargeHint}>
+                  Copy full Markdown for use
+                </Text>
+              </Pressable>
 
-          <View style={styles.provenanceBox}>
-            <Text style={styles.provenanceTitle}>
-              Version {version} · {record?.provenance === 'engine' ? 'Engine Generated' : record?.provenance === 'legacy' ? 'Legacy Proposition' : 'Persisted Markdown'}
-            </Text>
-            {record?.configurationId && (
-              <Text style={styles.provenanceDetail}>
-                Configuration: {record.configurationId}
+              <Pressable onPress={handleExport} style={styles.exportButtonLarge}>
+                <Text style={styles.exportButtonLargeText}>Share Design Pack</Text>
+                <Text style={styles.exportButtonLargeHint}>Export persisted Markdown</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {record?.provenance !== 'engine' && (
+            <View style={styles.provenanceBox}>
+              <Text selectable style={styles.provenanceTitle}>
+                Version {version} · {record?.provenance === 'legacy' ? 'Legacy Proposition' : 'Persisted Markdown'}
               </Text>
-            )}
-            {record?.generator && (
-              <Text style={styles.provenanceDetail}>
-                Generator: {record.generator}
+              {record?.configurationId && (
+                <Text selectable style={styles.provenanceDetail}>
+                  Configuration: {record.configurationId}
+                </Text>
+              )}
+              {record?.generator && (
+                <Text selectable style={styles.provenanceDetail}>
+                  Generator: {record.generator}
+                </Text>
+              )}
+              {record?.recordedAt && (
+                <Text selectable style={styles.provenanceDetail}>
+                  Recorded: {new Date(record.recordedAt).toLocaleString()}
+                </Text>
+              )}
+              <Text
+                selectable
+                style={[
+                  styles.provenanceDetail,
+                  staleness === 'stale' ? styles.staleDetail : styles.currentDetail,
+                ]}
+              >
+                Status: {staleness === 'stale' ? 'Stale (evidence changed)' : staleness === 'current' ? 'Current with latest evidence' : 'Unknown staleness'}
               </Text>
-            )}
-            {record?.recordedAt && (
-              <Text style={styles.provenanceDetail}>
-                Recorded: {new Date(record.recordedAt).toLocaleString()}
-              </Text>
-            )}
-            <Text style={[styles.provenanceDetail, staleness === 'stale' ? styles.staleDetail : styles.currentDetail]}>
-              Status: {staleness === 'stale' ? 'Stale (evidence changed)' : staleness === 'current' ? 'Current with latest evidence' : 'Unknown staleness'}
-            </Text>
-          </View>
+            </View>
+          )}
+
+          <Pressable onPress={handleBack} style={styles.footerReturnButton}>
+            <Text style={styles.footerReturnButtonText}>← Return to Ember</Text>
+          </Pressable>
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </Container>
   );
 }
 
 /**
- * Simple Markdown block renderer for the prototype.
- * Handles: H1, H2, H3, blockquotes, lists, bold, italic, paragraphs.
+ * Long-form Markdown block renderer for the Design Pack Use Screen.
+ * Supports selectable text across all blocks: H1, H2, H3, blockquotes,
+ * bullet lists, numbered steps, Markdown tables, fenced code blocks, and paragraphs.
  */
 function renderMarkdownBlocks(md: string): React.ReactNode[] {
   const lines = md.split('\n');
   const blocks: React.ReactNode[] = [];
   let key = 0;
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed) continue;
+
+    if (trimmed.startsWith('```')) {
+      if (inCodeBlock) {
+        key++;
+        blocks.push(
+          <View key={key} style={mdStyles.codeBlock}>
+            <Text selectable style={mdStyles.codeText}>
+              {codeLines.join('\n')}
+            </Text>
+          </View>,
+        );
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+        codeLines = [];
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!trimmed || trimmed === '>') continue;
+
+    // Skip Markdown table separator lines (e.g. |---|---|)
+    if (/^\|[\s\-:|]+\|$/.test(trimmed)) {
+      continue;
+    }
 
     key++;
 
     if (trimmed.startsWith('# ')) {
       blocks.push(
-        <Text key={key} style={mdStyles.h1}>
+        <Text key={key} selectable style={mdStyles.h1}>
           {trimmed.substring(2)}
         </Text>,
       );
     } else if (trimmed.startsWith('## ')) {
       blocks.push(
-        <Text key={key} style={mdStyles.h2}>
+        <Text key={key} selectable style={mdStyles.h2}>
           {trimmed.substring(3)}
         </Text>,
       );
     } else if (trimmed.startsWith('### ')) {
       blocks.push(
-        <Text key={key} style={mdStyles.h3}>
+        <Text key={key} selectable style={mdStyles.h3}>
           {trimmed.substring(4)}
         </Text>,
       );
     } else if (trimmed.startsWith('> ')) {
       blocks.push(
         <View key={key} style={mdStyles.blockquoteContainer}>
-          <Text style={mdStyles.blockquote}>
+          <Text selectable style={mdStyles.blockquote}>
             {stripInline(trimmed.substring(2))}
+          </Text>
+        </View>,
+      );
+    } else if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const cells = trimmed
+        .slice(1, -1)
+        .split('|')
+        .map((c) => stripInline(c.trim()));
+      const isHeaderRow =
+        cells[0]?.toLowerCase() === 'decision' &&
+        cells[1]?.toLowerCase() === 'recorded answer';
+      blocks.push(
+        <View
+          key={key}
+          style={[mdStyles.tableRow, isHeaderRow && mdStyles.tableHeaderRow]}
+        >
+          <Text
+            selectable
+            style={[mdStyles.tableCellLeft, isHeaderRow && mdStyles.tableHeaderText]}
+          >
+            {cells[0] ?? ''}
+          </Text>
+          <Text
+            selectable
+            style={[mdStyles.tableCellRight, isHeaderRow && mdStyles.tableHeaderText]}
+          >
+            {cells.slice(1).join(' · ')}
           </Text>
         </View>,
       );
     } else if (trimmed.startsWith('- ')) {
       blocks.push(
-        <Text key={key} style={mdStyles.listItem}>
+        <Text key={key} selectable style={mdStyles.listItem}>
           {'  •  '}
           {stripInline(trimmed.substring(2))}
+        </Text>,
+      );
+    } else if (/^\d+\.\s+/.test(trimmed)) {
+      blocks.push(
+        <Text key={key} selectable style={mdStyles.numberedItem}>
+          {stripInline(trimmed)}
         </Text>,
       );
     } else if (trimmed.startsWith('---')) {
       blocks.push(<View key={key} style={mdStyles.hr} />);
     } else if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
       blocks.push(
-        <Text key={key} style={mdStyles.bold}>
+        <Text key={key} selectable style={mdStyles.bold}>
           {trimmed.replace(/\*\*/g, '')}
         </Text>,
       );
     } else {
       blocks.push(
-        <Text key={key} style={mdStyles.paragraph}>
+        <Text key={key} selectable style={mdStyles.paragraph}>
           {stripInline(trimmed)}
         </Text>,
       );
@@ -301,7 +484,7 @@ const styles = StyleSheet.create({
     color: COLORS.emberOrange,
   },
 
-  // Header
+  // Standalone Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -317,6 +500,7 @@ const styles = StyleSheet.create({
   headerCenter: {
     flex: 1,
     alignItems: 'center',
+    paddingHorizontal: SPACING.xs,
   },
   headerLabel: {
     fontSize: 9,
@@ -338,10 +522,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.xs,
     paddingVertical: SPACING.xs,
   },
-  shareText: {
+  copyText: {
     fontSize: TYPOGRAPHY.sizes.xs,
     fontWeight: '700',
     color: COLORS.emberOrange,
+  },
+  shareText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
   },
   enquiryText: {
     fontSize: TYPOGRAPHY.sizes.xs,
@@ -352,6 +541,86 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: 'rgba(255, 107, 43, 0.12)',
     marginHorizontal: SPACING.lg,
+  },
+
+  // Embedded In-Plate Use Toolbar
+  embeddedUseBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    backgroundColor: '#161411',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.14)',
+    gap: SPACING.sm,
+  },
+  embeddedMetaGroup: {
+    flex: 1,
+    gap: 2,
+  },
+  embeddedBadge: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 1.2,
+  },
+  embeddedConfigLabel: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    color: COLORS.textMuted,
+  },
+  embeddedActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  usePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.emberOrange,
+    backgroundColor: 'rgba(255, 107, 43, 0.14)',
+  },
+  usePillCopied: {
+    borderColor: '#4ADE80',
+    backgroundColor: 'rgba(74, 222, 128, 0.14)',
+  },
+  usePillText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+    letterSpacing: 0.6,
+  },
+  usePillTextCopied: {
+    color: '#4ADE80',
+  },
+  usePillSecondary: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.25)',
+    backgroundColor: 'rgba(255, 107, 43, 0.05)',
+  },
+  usePillSecondaryText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    letterSpacing: 0.6,
+  },
+  returnEmberBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  returnEmberText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
   },
 
   scrollContent: {
@@ -388,6 +657,25 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(255, 107, 43, 0.08)',
     alignItems: 'center',
     gap: SPACING.md,
+  },
+  footerActionsRow: {
+    width: '100%',
+    gap: SPACING.sm,
+  },
+  copyButtonLarge: {
+    backgroundColor: COLORS.emberOrange,
+    borderRadius: 16,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xl,
+    alignItems: 'center',
+    gap: 4,
+    width: '100%',
+  },
+  copyButtonLargeText: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    fontWeight: '700',
+    color: COLORS.deepCharcoal,
+    letterSpacing: TYPOGRAPHY.letterSpacing.wide,
   },
   exportButtonLarge: {
     backgroundColor: 'rgba(255, 107, 43, 0.12)',
@@ -436,6 +724,16 @@ const styles = StyleSheet.create({
   staleDetail: {
     color: '#FFB347',
   },
+  footerReturnButton: {
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+  },
+  footerReturnButtonText: {
+    fontSize: TYPOGRAPHY.sizes.xs,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    letterSpacing: 0.5,
+  },
 });
 
 const mdStyles = StyleSheet.create({
@@ -445,7 +743,7 @@ const mdStyles = StyleSheet.create({
     color: COLORS.emberOrange,
     letterSpacing: TYPOGRAPHY.letterSpacing.wide,
     marginBottom: SPACING.md,
-    marginTop: SPACING.lg,
+    marginTop: SPACING.sm,
   },
   h2: {
     fontSize: TYPOGRAPHY.sizes.lg,
@@ -492,6 +790,56 @@ const mdStyles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 4,
     paddingLeft: SPACING.sm,
+  },
+  numberedItem: {
+    fontSize: TYPOGRAPHY.sizes.sm,
+    color: COLORS.textSecondary,
+    lineHeight: 20,
+    marginBottom: 6,
+    paddingLeft: SPACING.sm,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 107, 43, 0.1)',
+    paddingVertical: 6,
+    gap: SPACING.sm,
+  },
+  tableHeaderRow: {
+    borderBottomColor: 'rgba(255, 107, 43, 0.28)',
+    backgroundColor: 'rgba(255, 107, 43, 0.06)',
+    paddingHorizontal: 6,
+    borderRadius: 4,
+  },
+  tableCellLeft: {
+    flex: 1.1,
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textPrimary,
+    lineHeight: 17,
+  },
+  tableCellRight: {
+    flex: 1,
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: COLORS.textSecondary,
+    lineHeight: 17,
+  },
+  tableHeaderText: {
+    fontWeight: '700',
+    color: COLORS.emberOrange,
+  },
+  codeBlock: {
+    backgroundColor: '#12110E',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 43, 0.2)',
+    borderRadius: 8,
+    padding: SPACING.md,
+    marginVertical: SPACING.sm,
+  },
+  codeText: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: TYPOGRAPHY.sizes.xs,
+    color: '#F5ECE0',
+    lineHeight: 18,
   },
   hr: {
     height: 1,
