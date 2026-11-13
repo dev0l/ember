@@ -5,9 +5,9 @@ import {
   SharedValue,
   useSharedValue,
   withTiming,
-  runOnJS,
   Easing,
 } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 
 export interface PlateRailProps {
@@ -77,9 +77,9 @@ export function PlateRail({
 
       if (crossedDistance || crossedVelocity) {
         if (e.translationY < 0) {
-          runOnJS(triggerUp)();
+          scheduleOnRN(triggerUp);
         } else {
-          runOnJS(triggerDown)();
+          scheduleOnRN(triggerDown);
         }
       } else if (railProgress) {
         railProgress.value = withTiming(startVal.value, {

@@ -22,8 +22,6 @@ export default function MainLayout() {
       }}
     >
       <Stack.Screen name="collections/index" options={{ title: 'COLLECTIONS' }} />
-      <Stack.Screen name="recent" options={{ title: 'RECENT' }} />
-      <Stack.Screen name="import" options={{ title: 'IMPORT' }} />
       <Stack.Screen name="create/index" options={{ title: 'CREATE EMBER', headerShown: false }} />
       <Stack.Screen name="ember/[id]" options={{ title: 'EMBER', headerShown: false }} />
       <Stack.Screen name="ember/edit/[id]" options={{ title: 'EDIT EMBER', headerShown: false }} />

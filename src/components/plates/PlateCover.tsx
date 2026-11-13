@@ -6,9 +6,9 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
-  runOnJS,
   Easing,
 } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { COLORS, TYPOGRAPHY } from '@/theme';
 import { PlateFieldCanvas, type PlateEmberFieldItem } from './PlateFieldCanvas';
 
@@ -82,7 +82,7 @@ export function PlateCover({
     .onStart(() => {
       startOpenVal.value = openProgress ? openProgress.value : isSplit ? 0 : 1;
       if (isSplit && onDragPreviewTerritory) {
-        runOnJS(notifyPreview)();
+        scheduleOnRN(notifyPreview);
       }
     })
     .onUpdate((e) => {
@@ -103,9 +103,9 @@ export function PlateCover({
 
       if (crossedDistance || crossedVelocity) {
         if (e.translationY < 0) {
-          runOnJS(triggerUp)();
+          scheduleOnRN(triggerUp);
         } else {
-          runOnJS(triggerDown)();
+          scheduleOnRN(triggerDown);
         }
       } else if (openProgress) {
         openProgress.value = withTiming(startOpenVal.value, {
