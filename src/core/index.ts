@@ -39,3 +39,19 @@ export type {
   EmberDeletionSummary,
   EmberCompletionInput,
 } from './ember-completion';
+
+// Privacy Policy contract & structured content
+export {
+  PRIVACY_POLICY_URL,
+  PRIVACY_POLICY_CONTACT_EMAIL,
+  PRIVACY_POLICY_EFFECTIVE_DATE,
+  PRIVACY_POLICY_APP_VERSION,
+  PRIVACY_POLICY_PACKAGE_ID,
+  PRIVACY_POLICY_DEVELOPER,
+  PRIVACY_POLICY_HIGHLIGHTS,
+  PRIVACY_POLICY_SECTIONS,
+} from './privacy-policy';
+export type {
+  PrivacyPolicyHighlight,
+  PrivacyPolicySection,
+} from './privacy-policy';

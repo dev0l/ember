@@ -14,9 +14,11 @@ import { useFocusEffect, router } from 'expo-router';
 import { COLORS, TYPOGRAPHY, SPACING } from '@/theme';
 import {
   EMBER_NATURE_LABELS,
+  PRIVACY_POLICY_APP_VERSION,
   describeEmberDeletionSummary,
   type EmberSeed,
 } from '@/core';
+import { PrivacyPolicyModal } from '@/components/privacy/PrivacyPolicyModal';
 import type { Spark } from '@/core/spark-types';
 import type { EmberProject } from '@/core/ember-project-types';
 import { listEmbers, deleteEmber } from '@/services/ember-storage';
@@ -58,6 +60,7 @@ export default function CollectionsScreen({
   const [projects, setProjects] = useState<EmberProject[]>([]);
   const [actionEmber, setActionEmber] = useState<EmberSeed | null>(null);
   const [confirmingDeleteInModal, setConfirmingDeleteInModal] = useState(false);
+  const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
 
   const loadData = useCallback(() => {
     const loadedSeeds = listEmbers();
@@ -278,20 +281,50 @@ export default function CollectionsScreen({
           )}
           {embers.length === 0 ? (
             <View style={styles.emptyContainer}>
-              <EmberConstellationGlyph sparkCount={0} stage="seed" size={56} animated={true} />
-              <Text style={styles.emptyTitle}>No Embers yet</Text>
-              <Text style={styles.emptyText}>
-                Kindle your first Ember from a question or lingering Spark.
-              </Text>
-              <Pressable onPress={handleCreate} style={styles.emptyButton}>
-                <Text style={styles.emptyButtonText}>✦ Create Ember</Text>
-              </Pressable>
+              <View style={styles.emptyMainContent}>
+                <EmberConstellationGlyph sparkCount={0} stage="seed" size={56} animated={true} />
+                <Text style={styles.emptyTitle}>No Embers yet</Text>
+                <Text style={styles.emptyText}>
+                  Kindle your first Ember from a question or lingering Spark.
+                </Text>
+                <Pressable onPress={handleCreate} style={styles.emptyButton}>
+                  <Text style={styles.emptyButtonText}>✦ Create Ember</Text>
+                </Pressable>
+              </View>
+              <View style={styles.privacyFooterContainer}>
+                <Text style={styles.privacyFooterMeta}>
+                  EMBER v{PRIVACY_POLICY_APP_VERSION} · LOCAL-FIRST ·{' '}
+                </Text>
+                <Pressable
+                  onPress={() => setShowPrivacyPolicy(true)}
+                  hitSlop={10}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open Privacy Policy"
+                >
+                  <Text style={styles.privacyFooterLink}>PRIVACY POLICY</Text>
+                </Pressable>
+              </View>
             </View>
           ) : (
             <FlatList
               data={embers}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.listContent}
+              ListFooterComponent={
+                <View style={styles.privacyFooterContainer}>
+                  <Text style={styles.privacyFooterMeta}>
+                    EMBER v{PRIVACY_POLICY_APP_VERSION} · LOCAL-FIRST ·{' '}
+                  </Text>
+                  <Pressable
+                    onPress={() => setShowPrivacyPolicy(true)}
+                    hitSlop={10}
+                    accessibilityRole="button"
+                    accessibilityLabel="Open Privacy Policy"
+                  >
+                    <Text style={styles.privacyFooterLink}>PRIVACY POLICY</Text>
+                  </Pressable>
+                </View>
+              }
               renderItem={({ item }) => {
                 const emberSparks = sparksByEmberId[item.id] ?? [];
                 const previewSparkText =
@@ -579,6 +612,12 @@ export default function CollectionsScreen({
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* ── In-App Sovereign Privacy Policy Sheet ── */}
+      <PrivacyPolicyModal
+        visible={showPrivacyPolicy}
+        onClose={() => setShowPrivacyPolicy(false)}
+      />
     </Container>
   );
 }
@@ -703,10 +742,38 @@ const styles = StyleSheet.create({
   // Empty state
   emptyContainer: {
     flex: 1,
-    justifyContent: 'center',
+    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+  },
+  emptyMainContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
     gap: SPACING.sm,
+  },
+  privacyFooterContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING.md,
+    marginTop: SPACING.xs,
+  },
+  privacyFooterMeta: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9.5,
+    color: COLORS.textMuted,
+    letterSpacing: 1.0,
+    opacity: 0.72,
+  },
+  privacyFooterLink: {
+    fontFamily: TYPOGRAPHY.fonts.mono,
+    fontSize: 9.5,
+    fontWeight: '700',
+    color: COLORS.emberGold,
+    letterSpacing: 1.0,
+    textDecorationLine: 'underline',
   },
   emptyTitle: {
     fontSize: TYPOGRAPHY.sizes.md,
